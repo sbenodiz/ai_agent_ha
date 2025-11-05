@@ -13,7 +13,7 @@ ai_agent_ha:
   models:
     openai: "gpt-3.5-turbo"  # or "gpt-4", "gpt-4-turbo", etc.
     llama: "Llama-4-Maverick-17B-128E-Instruct-FP8"
-    gemini: "gemini-1.5-flash"  # or "gemini-1.5-pro", "gemini-1.0-pro", etc.
+    gemini: "gemini-2.5-flash"  # or "gemini-2.5-pro", "gemini-2.0-flash", etc.
     openrouter: "openai/gpt-4o"  # or any model available on OpenRouter
     anthropic: "claude-3-5-sonnet-20241022"  # or "claude-3-opus-20240229", etc.
     local: "llama3.2"  # model name for local API (optional if your API doesn't require it)
@@ -25,6 +25,7 @@ import logging
 import time
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional, Union
+from urllib.parse import quote
 
 import aiohttp
 import yaml  # type: ignore[import-untyped]
@@ -515,7 +516,7 @@ class OpenAIClient(BaseAIClient):
 
 class GeminiClient(BaseAIClient):
     def __init__(self, token, model="gemini-2.5-flash"):
-        self.token = token
+        self.token = token.strip() if token else token  # Strip whitespace from token
         self.model = model
         # Use v1beta for all models as per Google's current API documentation
         # All Gemini 2.0/2.5 models are available on v1beta endpoint
@@ -561,8 +562,8 @@ class GeminiClient(BaseAIClient):
             },
         }
 
-        # Add API key as query parameter
-        url_with_key = f"{self.api_url}?key={self.token}"
+        # Add API key as query parameter (URL encoded)
+        url_with_key = f"{self.api_url}?key={quote(self.token)}"
 
         _LOGGER.debug("Gemini request payload: %s", json.dumps(payload, indent=2))
 
@@ -978,7 +979,7 @@ class AiAgentHaAgent:
             model = models_config.get("openai", "gpt-3.5-turbo")
             self.ai_client = OpenAIClient(config.get("openai_token"), model)
         elif provider == "gemini":
-            model = models_config.get("gemini", "gemini-1.5-flash")
+            model = models_config.get("gemini", "gemini-2.5-flash")
             self.ai_client = GeminiClient(config.get("gemini_token"), model)
         elif provider == "openrouter":
             model = models_config.get("openrouter", "openai/gpt-4o")

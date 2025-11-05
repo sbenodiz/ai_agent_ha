@@ -125,9 +125,9 @@ class TestGeminiClient:
         try:
             from custom_components.ai_agent_ha.agent import GeminiClient
             
-            client = GeminiClient("test-token", "gemini-1.5-flash")
+            client = GeminiClient("test-token", "gemini-2.5-flash")
             assert client.token == "test-token"
-            assert client.model == "gemini-1.5-flash"
+            assert client.model == "gemini-2.5-flash"
         except ImportError:
             pytest.skip("GeminiClient not available")
 
