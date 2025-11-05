@@ -517,7 +517,9 @@ class GeminiClient(BaseAIClient):
     def __init__(self, token, model="gemini-1.5-flash"):
         self.token = token
         self.model = model
-        self.api_url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
+        # Use v1 for stable models, v1beta for experimental models
+        api_version = "v1beta" if "exp" in model or "preview" in model else "v1"
+        self.api_url = f"https://generativelanguage.googleapis.com/{api_version}/models/{model}:generateContent"
 
     async def get_response(self, messages, **kwargs):
         _LOGGER.debug("Making request to Gemini API with model: %s", self.model)
