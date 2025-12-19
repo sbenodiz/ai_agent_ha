@@ -22,6 +22,26 @@ Home Assistant is transitioning from dictionary-style data access to property-ba
 
 > "Detected that custom integration accessed lovelace_data['dashboards'] instead of lovelace_data.dashboards. This will stop working in Home Assistant 2026.2"
 
+## Verified API from Home Assistant Source Code
+
+The Lovelace component uses a **dataclass structure** (from `homeassistant/components/lovelace/__init__.py`):
+
+```python
+@dataclass
+class LovelaceData:
+    """Dataclass to store information in hass.data."""
+    mode: str
+    dashboards: dict[str | None, dashboard.LovelaceConfig]
+    resources: resources.ResourceYAMLCollection | resources.ResourceStorageCollection
+    yaml_dashboards: dict[str | None, ConfigType]
+```
+
+**Key details:**
+- `dashboards` is a property (attribute) on the `LovelaceData` dataclass
+- Keys are URL path strings, with `None` representing the default dashboard
+- Values are `LovelaceStorage` or `LovelaceYAML` objects (both inherit from `LovelaceConfig`)
+- The old `__getitem__` and `get` methods still work but log deprecation warnings
+
 ## Solution
 
 Replace dictionary-style access (`lovelace_data['dashboards']`, `lovelace_data.get(...)`) with property access (`lovelace_data.dashboards`).
@@ -32,18 +52,24 @@ Replace dictionary-style access (`lovelace_data['dashboards']`, `lovelace_data.g
 
 **Before:**
 ```python
+from homeassistant.components.lovelace import CONF_DASHBOARDS
+from homeassistant.components.lovelace import DOMAIN as LOVELACE_DOMAIN
+
 lovelace_config = self.hass.data.get(LOVELACE_DOMAIN, {})
 dashboards = lovelace_config.get(CONF_DASHBOARDS, {})
 ```
 
 **After:**
 ```python
+from homeassistant.components.lovelace import DOMAIN as LOVELACE_DOMAIN
+
 lovelace_data = self.hass.data.get(LOVELACE_DOMAIN)
 if lovelace_data is None:
     return [{"error": "Lovelace not available"}]
 
 # Use property access instead of dictionary access (required for HA 2026.2+)
-dashboards = getattr(lovelace_data, "dashboards", {})
+# lovelace_data is a LovelaceData dataclass with a 'dashboards' attribute
+dashboards = lovelace_data.dashboards
 ```
 
 ### Step 2: Fix `get_dashboard_config()` method (lines 2041-2101)
@@ -62,16 +88,17 @@ if lovelace_data is None:
     return {"error": "Lovelace not available"}
 
 # Use property access instead of dictionary access (required for HA 2026.2+)
+# The dashboards dict uses None as key for the default dashboard
+dashboards = lovelace_data.dashboards
 if dashboard_url is None:
-    dashboard = getattr(lovelace_data, "default_dashboard", None)
+    dashboard = dashboards.get(None)  # None key = default dashboard
 else:
-    dashboards = getattr(lovelace_data, "dashboards", {})
     dashboard = dashboards.get(dashboard_url)
 ```
 
 ### Step 3: Backward Compatibility
 
-Use `getattr()` with a default value to maintain backward compatibility with older Home Assistant versions that might still use the dictionary-style interface.
+The `LovelaceData` dataclass has been in Home Assistant for some time. For safety, we can use `hasattr()` checks to verify the expected structure exists before accessing properties.
 
 ## Files to Modify
 
@@ -87,5 +114,6 @@ After implementation:
 
 ## References
 
+- [Home Assistant Core - Lovelace __init__.py](https://github.com/home-assistant/core/blob/dev/homeassistant/components/lovelace/__init__.py) - Source code showing LovelaceData dataclass
 - [GitHub Issue #861 - DW deprecated warning](https://github.com/dwainscheeren/dwains-lovelace-dashboard/issues/861)
 - [Home Assistant Multiple Dashboards Documentation](https://www.home-assistant.io/dashboards/dashboards/)
