@@ -94,7 +94,7 @@ class TestConfigFlow:
         """Test that AI providers are defined."""
         try:
             from custom_components.ai_agent_ha.const import AI_PROVIDERS
-            expected_providers = ["llama", "openai", "gemini", "openrouter", "anthropic", "local"]
+            expected_providers = ["llama", "openai", "gemini", "openrouter", "anthropic", "alter", "zai", "local"]
             assert all(provider in AI_PROVIDERS for provider in expected_providers)
         except Exception as e:
             pytest.skip(f"AI providers test failed: {e}")

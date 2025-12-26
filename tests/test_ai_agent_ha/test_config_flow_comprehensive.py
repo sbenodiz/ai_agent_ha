@@ -75,7 +75,7 @@ class TestConfigFlowComprehensive:
             assert isinstance(AI_PROVIDERS, list)
             assert len(AI_PROVIDERS) > 0
             
-            expected_providers = ["llama", "openai", "gemini", "openrouter", "anthropic", "local"]
+            expected_providers = ["llama", "openai", "gemini", "openrouter", "anthropic", "alter", "zai", "local"]
             for provider in expected_providers:
                 assert provider in AI_PROVIDERS
                 
@@ -145,6 +145,8 @@ class TestConfigFlowComprehensive:
                 "gemini": "Google Gemini",
                 "openrouter": "OpenRouter",
                 "anthropic": "Anthropic",
+                "alter": "Alter",
+                "zai": "z.ai",
                 "local": "Local Model"
             }
             
@@ -166,6 +168,8 @@ class TestConfigFlowComprehensive:
                 "gemini": "async_step_gemini",
                 "llama": "async_step_llama",
                 "openrouter": "async_step_openrouter",
+                "alter": "async_step_alter",
+                "zai": "async_step_zai",
                 "local": "async_step_local"
             }
             
