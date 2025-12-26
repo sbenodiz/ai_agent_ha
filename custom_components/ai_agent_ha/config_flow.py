@@ -26,6 +26,7 @@ PROVIDERS = {
     "openrouter": "OpenRouter",
     "anthropic": "Anthropic (Claude)",
     "alter": "Alter",
+    "zai": "z.ai",
     "local": "Local Model",
 }
 
@@ -36,6 +37,8 @@ TOKEN_FIELD_NAMES = {
     "openrouter": "openrouter_token",
     "anthropic": "anthropic_token",
     "alter": "alter_token",
+    "zai": "zai_token",
+    "zai_endpoint": "zai_endpoint",
     "local": CONF_LOCAL_URL,  # For local models, we use URL instead of token
 }
 
@@ -46,6 +49,8 @@ TOKEN_LABELS = {
     "openrouter": "OpenRouter API Key",
     "anthropic": "Anthropic API Key",
     "alter": "Alter API Key",
+    "zai": "z.ai API Key",
+    "zai_endpoint": "z.ai API Endpoint Type",
     "local": "Local API URL (e.g., http://localhost:11434/api/generate)",
 }
 
@@ -56,6 +61,7 @@ DEFAULT_MODELS = {
     "openrouter": "openai/gpt-4o",
     "anthropic": "claude-sonnet-4-5-20250929",
     "alter": "",  # User enters custom model
+    "zai": "glm-4.7",  # Z.ai's latest flagship model
     "local": "llama3.2",  # Updated to use llama3.2 as default
 }
 
@@ -117,6 +123,18 @@ AVAILABLE_MODELS = {
     ],
     # Alter - user enters custom model name only
     "alter": [
+        "Custom...",
+    ],
+    # z.ai - available models
+    "zai": [
+        "glm-4.7",
+        "glm-4.6",
+        "glm-4.5",
+        "glm-4.5-air",
+        "glm-4.5-x",
+        "glm-4.5-airx",
+        "glm-4.5-flash",
+        "glm-4-32b-0414-128k",
         "Custom...",
     ],
     # For local models, provide common Ollama models with llama3.2 as the default
@@ -200,6 +218,11 @@ class AiAgentHaConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):  # type: ig
                 # Store the configuration data
                 self.config_data[token_field] = token_value
 
+                # For z.ai, store endpoint type
+                if provider == "zai":
+                    endpoint_type = user_input.get("zai_endpoint", "general")
+                    self.config_data["zai_endpoint"] = endpoint_type
+
                 # Add model configuration if provided
                 selected_model = user_input.get("model")
                 custom_model = user_input.get("custom_model")
@@ -220,7 +243,7 @@ class AiAgentHaConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):  # type: ig
                     self.config_data["models"][provider] = selected_model
                 else:
                     # For local and alter providers, allow empty model name
-                    if provider in ("local", "alter"):
+                    if provider in ("local", "alter", "zai"):
                         self.config_data["models"][provider] = ""
                     else:
                         # Fallback to default model for other providers
@@ -235,6 +258,41 @@ class AiAgentHaConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):  # type: ig
             except Exception:  # pylint: disable=broad-except
                 _LOGGER.exception("Unexpected exception")
                 errors["base"] = "unknown"
+
+        if provider == "zai":
+            # For z.ai provider, we need token, endpoint type, and optional model name
+            model_options = AVAILABLE_MODELS.get("zai", ["Custom..."])
+            schema_dict = {
+                vol.Required(token_field): TextSelector(
+                    TextSelectorConfig(type="password")
+                ),
+                vol.Optional(
+                    "zai_endpoint", default="general"
+                ): SelectSelector(
+                    SelectSelectorConfig(
+                        options=[
+                            {"value": "general", "label": "General Purpose"},
+                            {"value": "coding", "label": "Coding (3× usage, 1/7 cost)"},
+                        ]
+                    )
+                ),
+                vol.Optional("model", default="glm-4.7"): SelectSelector(
+                    SelectSelectorConfig(options=model_options)
+                ),
+                vol.Optional("custom_model"): TextSelector(
+                    TextSelectorConfig(type="text")
+                ),
+            }
+
+            return self.async_show_form(
+                step_id="configure",
+                data_schema=vol.Schema(schema_dict),
+                errors=errors,
+                description_placeholders={
+                    "token_label": token_label,
+                    "provider": PROVIDERS[provider],
+                },
+            )
 
         if provider == "local":
             # For local provider, we need both URL and optional model name
@@ -371,6 +429,11 @@ class AiAgentHaOptionsFlowHandler(config_entries.OptionsFlow):
                     selected_model = user_input.get("model")
                     custom_model = user_input.get("custom_model")
 
+                    # For zai, update endpoint type
+                    if provider == "zai":
+                        endpoint_type = user_input.get("zai_endpoint", "general")
+                        updated_data["zai_endpoint"] = endpoint_type
+
                     # Initialize models dict if it doesn't exist
                     if "models" not in updated_data:
                         updated_data["models"] = {}
@@ -382,8 +445,8 @@ class AiAgentHaOptionsFlowHandler(config_entries.OptionsFlow):
                         # Use selected model if it's not the "Custom..." option
                         updated_data["models"][provider] = selected_model
                     else:
-                        # For local and alter providers, allow empty model name
-                        if provider in ("local", "alter"):
+                        # For local, alter, and zai providers, allow empty model name
+                        if provider in ("local", "alter", "zai"):
                             updated_data["models"][provider] = ""
                         else:
                             # Ensure we keep the current model or use default for other providers
@@ -407,6 +470,41 @@ class AiAgentHaOptionsFlowHandler(config_entries.OptionsFlow):
                 errors["base"] = "unknown"
 
         # Build schema for the selected provider in options
+        if provider == "zai":
+            current_endpoint = self.config_entry.data.get("zai_endpoint", "general")
+            model_options = AVAILABLE_MODELS.get("zai", ["glm-4.7"])
+            schema_dict = {
+                vol.Required(token_field, default=display_token): TextSelector(
+                    TextSelectorConfig(type="password")
+                ),
+                vol.Optional(
+                    "zai_endpoint", default=current_endpoint
+                ): SelectSelector(
+                    SelectSelectorConfig(
+                        options=[
+                            {"value": "general", "label": "General Purpose"},
+                            {"value": "coding", "label": "Coding (3× usage, 1/7 cost)"},
+                        ]
+                    )
+                ),
+                vol.Optional("model", default=current_model): SelectSelector(
+                    SelectSelectorConfig(options=model_options)
+                ),
+                vol.Optional("custom_model"): TextSelector(
+                    TextSelectorConfig(type="text")
+                ),
+            }
+
+            return self.async_show_form(
+                step_id="configure_options",
+                data_schema=vol.Schema(schema_dict),
+                errors=errors,
+                description_placeholders={
+                    "token_label": token_label,
+                    "provider": PROVIDERS[provider],
+                },
+            )
+
         if provider == "local":
             # For local provider, we need both URL and optional model name
             current_url = self.config_entry.data.get(CONF_LOCAL_URL, "")

@@ -13,6 +13,7 @@ const PROVIDERS = {
   openrouter: "OpenRouter",
   anthropic: "Anthropic",
   alter: "Alter",
+  zai: "z.ai",
   local: "Local Model",
 };
 
@@ -640,6 +641,7 @@ class AiAgentHaPanel extends LitElement {
                 "AI Agent HA (Llama)": "llama",
                 "AI Agent HA (Anthropic (Claude))": "anthropic",
                 "AI Agent HA (Alter)": "alter",
+                "AI Agent HA (z.ai)": "zai",
                 "AI Agent HA (Local Model)": "local",
               };
               provider = titleToProviderMap[entry.title] || "unknown";

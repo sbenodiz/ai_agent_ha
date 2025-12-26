@@ -9,7 +9,7 @@ This guide provides information about the development workflow and technical asp
 - Python 3.12+
 - Git
 - Home Assistant development environment
-- API keys for one or more supported AI providers (OpenAI, Google Gemini, Anthropic, OpenRouter, Llama)
+- API keys for one or more supported AI providers (OpenAI, Google Gemini, Anthropic, OpenRouter, Alter, z.ai, Llama)
 
 ### Setting Up a Development Environment
 

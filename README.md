@@ -1,6 +1,6 @@
 # AI Agent HA
 
-A powerful Home Assistant custom integration that connects your Home Assistant instance with multiple AI providers (OpenAI, Google Gemini, Anthropic (Claude), OpenRouter, and Llama) to translate user requests into valid Home Assistant operations, including creating automations automatically!
+A powerful Home Assistant custom integration that connects your Home Assistant instance with multiple AI providers (OpenAI, Google Gemini, Anthropic (Claude), OpenRouter, Alter, z.ai, and Llama) to translate user requests into valid Home Assistant operations, including creating automations automatically!
 
 ## 🚀 Quick Install
 
@@ -22,7 +22,7 @@ Another way to support me will be to try my new project. Askie - AI for kids. I 
 
 ## ✨ Features
 
-- 🤖 **Multiple AI Provider Support**: OpenAI, Google Gemini, Anthropic (Claude), OpenRouter, and Llama
+- 🤖 **Multiple AI Provider Support**: OpenAI, Google Gemini, Anthropic (Claude), OpenRouter, Alter, z.ai, and Llama
 - 🎯 **Model Selection**: Choose from predefined models or use custom model names
 - 🏠 **Smart Home Control**: Turn lights on/off, control climate, and manage devices
 - ⚡ **Automation Creation**: Automatically create automations based on natural language
@@ -125,6 +125,20 @@ For detailed dashboard creation documentation, see: [Dashboard Creation Guide](d
 - **Models**: Llama 4 Maverick, Llama 3.1, Llama 3.2
 - **Setup**: Get API key from your Llama provider
 
+### Alter
+- **Models**: Various custom models
+- **Setup**: Get API key from [Alter HQ](https://alterhq.com)
+
+### z.ai
+- **Models**: GLM-4.7, GLM-4.6, GLM-4.5, GLM-4.5-air, GLM-4.5-x, GLM-4.5-airx, GLM-4.5-flash
+- **Setup**: Get API key from [Z.ai Platform](https://z.ai/manage-apikey/apikey-list)
+- **Endpoints**:
+  - General Purpose: Standard AI tasks
+  - Coding: Optimized for coding scenarios (3× usage, 1/7 cost)
+- **Popular Models**:
+  - `glm-4.7` (Latest flagship model)
+  - `glm-4.5-flash` (Fast and efficient)
+
 ## 📦 Installation
 
 ### HACS Installation (Recommended)
@@ -162,10 +176,13 @@ The integration uses a two-step configuration process:
 ### Step 1: Choose AI Provider
 Select your preferred AI provider from the dropdown:
 - OpenAI
-- Google Gemini  
+- Google Gemini
 - Anthropic (Claude)
 - OpenRouter
+- Alter
+- z.ai
 - Llama
+- Local Model
 
 ### Step 2: Configure Provider
 Enter your API credentials and optionally select a model:
@@ -181,6 +198,25 @@ ai_agent_ha:
   anthropic_token: "sk-ant-..."
   models:
     anthropic: "claude-3-5-sonnet-20241022"
+```
+
+```yaml
+# Example with z.ai provider
+ai_agent_ha:
+  ai_provider: zai
+  zai_token: "your-zai-api-key"
+  zai_endpoint: "general"  # or "coding" for coding-optimized endpoint
+  models:
+    zai: "glm-4.7"
+```
+
+```yaml
+# Example with Alter provider
+ai_agent_ha:
+  ai_provider: alter
+  alter_token: "your-alter-api-key"
+  models:
+    alter: "your-model-name"
 ```
 
 ## 🎮 Usage
@@ -200,6 +236,9 @@ Enter any model name in the "Custom Model" field:
 - Anthropic: `claude-3-opus-20240229`
 - OpenRouter: `anthropic/claude-3-opus`
 - Gemini: `gemini-pro-vision`
+- Alter: `your-custom-model-name`
+- z.ai: `glm-4.7`
+- Llama: `Llama-4-Maverick-17B-128E-Instruct-FP8`
 
 ### Automation Creation
 The AI can create automations automatically:
@@ -283,7 +322,7 @@ All workflows run automatically on push and pull requests using Python 3.12 to e
 
 ### API Structure
 The integration provides these main components:
-- **AI Clients**: Modular providers (OpenAI, Gemini, Claude, OpenRouter, Llama)
+- **AI Clients**: Modular providers (OpenAI, Gemini, Anthropic (Claude), OpenRouter, Alter, z.ai, Llama, Local)
 - **Agent**: Core logic for processing requests
 - **Config Flow**: Setup and options management
 - **Frontend**: Chat interface

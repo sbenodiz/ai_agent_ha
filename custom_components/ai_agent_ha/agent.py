@@ -2,13 +2,15 @@
 
 Example config:
 ai_agent_ha:
-  ai_provider: openai  # or 'llama', 'gemini', 'openrouter', 'anthropic', 'alter', 'local'
+  ai_provider: openai  # or 'llama', 'gemini', 'openrouter', 'anthropic', 'alter', 'zai', 'local'
   llama_token: "..."
   openai_token: "..."
   gemini_token: "..."
   openrouter_token: "..."
   anthropic_token: "..."
   alter_token: "..."
+  zai_token: "..."
+  zai_endpoint: "general"  # or 'coding' for z.ai (3× usage, 1/7 cost)
   local_url: "http://localhost:11434/api/generate"  # Required for local models
   # Model configuration (optional, defaults will be used if not specified)
   models:
@@ -18,6 +20,7 @@ ai_agent_ha:
     openrouter: "openai/gpt-4o"  # or any model available on OpenRouter
     anthropic: "claude-sonnet-4-5-20250929"  # or "claude-sonnet-4-20250514", "claude-3-5-sonnet-20241022", "claude-3-opus-20240229", etc.
     alter: "your-model-name"  # model name for Alter API
+    zai: "glm-4.7"  # model name for z.ai API (glm-4.7, glm-4.6, glm-4.5, etc.)
     local: "llama3.2"  # model name for local API (optional if your API doesn't require it)
 """
 
@@ -76,6 +79,7 @@ def sanitize_for_logging(data: Any, mask: str = "***REDACTED***") -> Any:
         "anthropic_token",
         "openrouter_token",
         "alter_token",
+        "zai_token",
     }
 
     if isinstance(data, dict):
@@ -846,6 +850,60 @@ class AlterClient(BaseAIClient):
                 return str(data)
 
 
+class ZaiClient(BaseAIClient):
+    def __init__(self, token, model="", endpoint_type="general"):
+        self.token = token
+        self.model = model
+        self.endpoint_type = endpoint_type
+        # General endpoint: https://api.z.ai/api/paas/v4/chat/completions
+        # Coding endpoint: https://api.z.ai/api/coding/paas/v4/chat/completions
+        if endpoint_type == "coding":
+            self.api_url = "https://api.z.ai/api/coding/paas/v4/chat/completions"
+        else:
+            self.api_url = "https://api.z.ai/api/paas/v4/chat/completions"
+
+    async def get_response(self, messages, **kwargs):
+        _LOGGER.debug(
+            "Making request to z.ai API with model: %s, endpoint: %s",
+            self.model,
+            self.endpoint_type,
+        )
+        headers = {
+            "Authorization": f"Bearer {self.token}",
+            "Content-Type": "application/json",
+        }
+        payload = {
+            "model": self.model,
+            "messages": messages,
+            "temperature": 0.7,
+            "top_p": 0.9,
+        }
+
+        _LOGGER.debug("z.ai request payload: %s", json.dumps(payload, indent=2))
+
+        async with aiohttp.ClientSession() as session:
+            async with session.post(
+                self.api_url,
+                headers=headers,
+                json=payload,
+                timeout=aiohttp.ClientTimeout(total=300),
+            ) as resp:
+                if resp.status != 200:
+                    error_text = await resp.text()
+                    _LOGGER.error("z.ai API error %d: %s", resp.status, error_text)
+                    raise Exception(f"z.ai API error {resp.status}")
+                data = await resp.json()
+                # Extract text from z.ai response (OpenAI-compatible format)
+                choices = data.get("choices", [])
+                if not choices:
+                    _LOGGER.warning("z.ai response missing choices")
+                    _LOGGER.debug("Full z.ai response: %s", json.dumps(data, indent=2))
+                    return str(data)
+                if choices and "message" in choices[0]:
+                    return choices[0]["message"].get("content", str(data))
+                return str(data)
+
+
 # === Main Agent ===
 class AiAgentHaAgent:
     """Agent for handling queries with dynamic data requests and multiple AI providers."""
@@ -1125,6 +1183,10 @@ class AiAgentHaAgent:
         elif provider == "alter":
             model = models_config.get("alter", "")
             self.ai_client = AlterClient(config.get("alter_token"), model)
+        elif provider == "zai":
+            model = models_config.get("zai", "glm-4.7")
+            endpoint_type = config.get("zai_endpoint", "general")
+            self.ai_client = ZaiClient(config.get("zai_token"), model, endpoint_type)
         elif provider == "local":
             model = models_config.get("local", "")
             url = config.get("local_url")
@@ -1156,6 +1218,8 @@ class AiAgentHaAgent:
             token = self.config.get("anthropic_token")
         elif provider == "alter":
             token = self.config.get("alter_token")
+        elif provider == "zai":
+            token = self.config.get("zai_token")
         elif provider == "local":
             token = self.config.get("local_url")
         else:
@@ -2568,6 +2632,11 @@ Then restart Home Assistant to see your new dashboard in the sidebar."""
                     "model": models_config.get("alter", ""),
                     "client_class": AlterClient,
                 },
+                "zai": {
+                    "token_key": "zai_token",
+                    "model": models_config.get("zai", ""),
+                    "client_class": ZaiClient,
+                },
                 "local": {
                     "token_key": "local_url",
                     "model": models_config.get("local", ""),
@@ -2593,19 +2662,33 @@ Then restart Home Assistant to see your new dashboard in the sidebar."""
 
             # Initialize client
             try:
-                if selected_provider == "local":
+                if selected_provider == "zai":
+                    # ZaiClient takes (token, model, endpoint_type)
+                    endpoint_type = config.get("zai_endpoint", "general")
+                    self.ai_client = provider_settings["client_class"](
+                        token=token,
+                        model=provider_settings["model"],
+                        endpoint_type=endpoint_type
+                    )
+                    _LOGGER.debug(
+                        f"Initialized {selected_provider} client with model {provider_settings['model']}, endpoint_type {endpoint_type}"
+                    )
+                elif selected_provider == "local":
                     # LocalClient takes (url, model)
                     self.ai_client = provider_settings["client_class"](
                         url=token, model=provider_settings["model"]
+                    )
+                    _LOGGER.debug(
+                        f"Initialized {selected_provider} client with model {provider_settings['model']}"
                     )
                 else:
                     # Other clients take (token, model)
                     self.ai_client = provider_settings["client_class"](
                         token=token, model=provider_settings["model"]
                     )
-                _LOGGER.debug(
-                    f"Initialized {selected_provider} client with model {provider_settings['model']}"
-                )
+                    _LOGGER.debug(
+                        f"Initialized {selected_provider} client with model {provider_settings['model']}"
+                    )
             except Exception as e:
                 error_msg = f"Error initializing {selected_provider} client: {str(e)}"
                 _LOGGER.error(error_msg)
