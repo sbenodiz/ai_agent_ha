@@ -1,0 +1,69 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI Agent HA Panel Test</title>
+    <style>
+        :root {
+            --primary-background-color: #fafafa;
+            --secondary-background-color: #e5e5e5;
+            --card-background-color: #ffffff;
+            --primary-color: #03a9f4;
+            --primary-text-color: #212121;
+            --secondary-text-color: #727272;
+            --text-primary-color: #ffffff;
+            --divider-color: #e0e0e0;
+            --error-color: #db4437;
+            --error-background-color: #fce4ec;
+            --app-header-background-color: #03a9f4;
+            --app-header-text-color: #ffffff;
+            --accent-color: #ff9800;
+            --info-color: #2196f3;
+            --success-color: #4caf50;
+        }
+        body {
+            margin: 0;
+            padding: 0;
+            font-family: "Roboto", "Noto", sans-serif;
+        }
+    </style>
+    <script type="module" src="../../custom_components/ai_agent_ha/frontend/ai_agent_ha-panel.js"></script>
+</head>
+<body>
+    <ai_agent_ha-panel id="panel"></ai_agent_ha-panel>
+
+    <script>
+        // Mock hass object for testing
+        const mockHass = {
+            callService: async (domain, service, data) => {
+                console.log('Mock service call:', domain, service, data);
+                return { success: true };
+            },
+            callWS: async (data) => {
+                console.log('Mock WebSocket call:', data);
+                if (data.type === 'config_entries/get') {
+                    return [
+                        {
+                            domain: 'ai_agent_ha',
+                            title: 'AI Agent HA (Llama)',
+                            data: { ai_provider: 'llama' }
+                        }
+                    ];
+                }
+                return {};
+            },
+            connection: {
+                subscribeEvents: (callback, eventType) => {
+                    console.log('Mock event subscription:', eventType);
+                    return () => {};
+                }
+            }
+        };
+
+        // Set the mock hass object on the panel
+        const panel = document.getElementById('panel');
+        panel.hass = mockHass;
+    </script>
+</body>
+</html>
