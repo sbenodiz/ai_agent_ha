@@ -266,9 +266,7 @@ class AiAgentHaConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):  # type: ig
                 vol.Required(token_field): TextSelector(
                     TextSelectorConfig(type="password")
                 ),
-                vol.Optional(
-                    "zai_endpoint", default="general"
-                ): SelectSelector(
+                vol.Optional("zai_endpoint", default="general"): SelectSelector(
                     SelectSelectorConfig(
                         options=[
                             {"value": "general", "label": "General Purpose"},
@@ -477,9 +475,7 @@ class AiAgentHaOptionsFlowHandler(config_entries.OptionsFlow):
                 vol.Required(token_field, default=display_token): TextSelector(
                     TextSelectorConfig(type="password")
                 ),
-                vol.Optional(
-                    "zai_endpoint", default=current_endpoint
-                ): SelectSelector(
+                vol.Optional("zai_endpoint", default=current_endpoint): SelectSelector(
                     SelectSelectorConfig(
                         options=[
                             {"value": "general", "label": "General Purpose"},

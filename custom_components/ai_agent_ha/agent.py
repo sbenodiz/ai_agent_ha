@@ -2678,7 +2678,7 @@ Then restart Home Assistant to see your new dashboard in the sidebar."""
                     self.ai_client = provider_settings["client_class"](
                         token=token,
                         model=provider_settings["model"],
-                        endpoint_type=endpoint_type
+                        endpoint_type=endpoint_type,
                     )
                     _LOGGER.debug(
                         f"Initialized {selected_provider} client with model {provider_settings['model']}, endpoint_type {endpoint_type}"
