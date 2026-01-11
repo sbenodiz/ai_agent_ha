@@ -3,10 +3,14 @@ query:
   description: "Run a custom AI prompt against your Home Assistant state dump."
   fields:
     prompt:
-      description: "The question or instruction to send to the AI model."
+      description: "The question or instruction to send to AI model."
       example: "Turn on all the lights in the living room"
+    debug:
+      description: "Include a debug trace of the HA↔AI conversation (true/false)."
+      example: true
+      default: false
     provider:
-      description: "The AI provider to use (openai, llama, gemini, openrouter)"
+      description: "The AI provider to use (openai, llama, gemini, openrouter, anthropic, alter, zai, local)"
       example: "openai"
       default: "openai"
       selector:
@@ -16,6 +20,10 @@ query:
             - "llama"
             - "gemini"
             - "openrouter"
+            - "anthropic"
+            - "alter"
+            - "zai"
+            - "local"
 
 create_dashboard:
   name: "Create Dashboard via AI Agent"
@@ -25,7 +33,7 @@ create_dashboard:
       description: "The dashboard configuration as a JSON object."
       example: '{"title": "My Dashboard", "url_path": "my-dashboard", "views": []}'
     provider:
-      description: "The AI provider to use (openai, llama, gemini, openrouter)"
+      description: "The AI provider to use (openai, llama, gemini, openrouter, anthropic, alter, zai, local)"
       example: "openai"
       default: "openai"
       selector:
@@ -35,6 +43,10 @@ create_dashboard:
             - "llama"
             - "gemini"
             - "openrouter"
+            - "anthropic"
+            - "alter"
+            - "zai"
+            - "local"
 
 create_automation:
   name: "Create Automation via AI Agent"
@@ -44,7 +56,7 @@ create_automation:
       description: "The automation configuration as a JSON object."
       example: '{"alias": "Turn off lights at 9 PM", "trigger": [{"platform": "time", "at": "21:00:00"}], "action": [{"service": "light.turn_off", "target": {"entity_id": "light.living_room"}}]}'
     provider:
-      description: "The AI provider to use (openai, llama, gemini, openrouter)"
+      description: "The AI provider to use (openai, llama, gemini, openrouter, anthropic, alter, zai, local)"
       example: "openai"
       default: "openai"
       selector:
@@ -54,19 +66,23 @@ create_automation:
             - "llama"
             - "gemini"
             - "openrouter"
+            - "anthropic"
+            - "alter"
+            - "zai"
+            - "local"
 
 update_dashboard:
   name: "Update Dashboard via AI Agent"
   description: "Update an existing Home Assistant dashboard using AI assistance."
   fields:
     dashboard_url:
-      description: "The URL path of the dashboard to update."
+      description: "The URL path of dashboard to update."
       example: "my-dashboard"
     dashboard_config:
       description: "The updated dashboard configuration as a JSON object."
       example: '{"title": "Updated Dashboard", "views": []}'
     provider:
-      description: "The AI provider to use (openai, llama, gemini, openrouter)"
+      description: "The AI provider to use (openai, llama, gemini, openrouter, anthropic, alter, zai, local)"
       example: "openai"
       default: "openai"
       selector:
@@ -76,3 +92,7 @@ update_dashboard:
             - "llama"
             - "gemini"
             - "openrouter"
+            - "anthropic"
+            - "alter"
+            - "zai"
+            - "local"

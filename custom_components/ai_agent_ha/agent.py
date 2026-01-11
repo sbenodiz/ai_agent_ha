@@ -2,13 +2,15 @@
 
 Example config:
 ai_agent_ha:
-  ai_provider: openai  # or 'llama', 'gemini', 'openrouter', 'anthropic', 'alter', 'local'
+  ai_provider: openai  # or 'llama', 'gemini', 'openrouter', 'anthropic', 'alter', 'zai', 'local'
   llama_token: "..."
   openai_token: "..."
   gemini_token: "..."
   openrouter_token: "..."
   anthropic_token: "..."
   alter_token: "..."
+  zai_token: "..."
+  zai_endpoint: "general"  # or 'coding' for z.ai (3× usage, 1/7 cost)
   local_url: "http://localhost:11434/api/generate"  # Required for local models
   # Model configuration (optional, defaults will be used if not specified)
   models:
@@ -18,6 +20,7 @@ ai_agent_ha:
     openrouter: "openai/gpt-4o"  # or any model available on OpenRouter
     anthropic: "claude-sonnet-4-5-20250929"  # or "claude-sonnet-4-20250514", "claude-3-5-sonnet-20241022", "claude-3-opus-20240229", etc.
     alter: "your-model-name"  # model name for Alter API
+    zai: "glm-4.7"  # model name for z.ai API (glm-4.7, glm-4.6, glm-4.5, etc.)
     local: "llama3.2"  # model name for local API (optional if your API doesn't require it)
 """
 
@@ -76,6 +79,7 @@ def sanitize_for_logging(data: Any, mask: str = "***REDACTED***") -> Any:
         "anthropic_token",
         "openrouter_token",
         "alter_token",
+        "zai_token",
     }
 
     if isinstance(data, dict):
@@ -846,6 +850,60 @@ class AlterClient(BaseAIClient):
                 return str(data)
 
 
+class ZaiClient(BaseAIClient):
+    def __init__(self, token, model="", endpoint_type="general"):
+        self.token = token
+        self.model = model
+        self.endpoint_type = endpoint_type
+        # General endpoint: https://api.z.ai/api/paas/v4/chat/completions
+        # Coding endpoint: https://api.z.ai/api/coding/paas/v4/chat/completions
+        if endpoint_type == "coding":
+            self.api_url = "https://api.z.ai/api/coding/paas/v4/chat/completions"
+        else:
+            self.api_url = "https://api.z.ai/api/paas/v4/chat/completions"
+
+    async def get_response(self, messages, **kwargs):
+        _LOGGER.debug(
+            "Making request to z.ai API with model: %s, endpoint: %s",
+            self.model,
+            self.endpoint_type,
+        )
+        headers = {
+            "Authorization": f"Bearer {self.token}",
+            "Content-Type": "application/json",
+        }
+        payload = {
+            "model": self.model,
+            "messages": messages,
+            "temperature": 0.7,
+            "top_p": 0.9,
+        }
+
+        _LOGGER.debug("z.ai request payload: %s", json.dumps(payload, indent=2))
+
+        async with aiohttp.ClientSession() as session:
+            async with session.post(
+                self.api_url,
+                headers=headers,
+                json=payload,
+                timeout=aiohttp.ClientTimeout(total=300),
+            ) as resp:
+                if resp.status != 200:
+                    error_text = await resp.text()
+                    _LOGGER.error("z.ai API error %d: %s", resp.status, error_text)
+                    raise Exception(f"z.ai API error {resp.status}")
+                data = await resp.json()
+                # Extract text from z.ai response (OpenAI-compatible format)
+                choices = data.get("choices", [])
+                if not choices:
+                    _LOGGER.warning("z.ai response missing choices")
+                    _LOGGER.debug("Full z.ai response: %s", json.dumps(data, indent=2))
+                    return str(data)
+                if choices and "message" in choices[0]:
+                    return choices[0]["message"].get("content", str(data))
+                return str(data)
+
+
 # === Main Agent ===
 class AiAgentHaAgent:
     """Agent for handling queries with dynamic data requests and multiple AI providers."""
@@ -1125,6 +1183,10 @@ class AiAgentHaAgent:
         elif provider == "alter":
             model = models_config.get("alter", "")
             self.ai_client = AlterClient(config.get("alter_token"), model)
+        elif provider == "zai":
+            model = models_config.get("zai", "glm-4.7")
+            endpoint_type = config.get("zai_endpoint", "general")
+            self.ai_client = ZaiClient(config.get("zai_token"), model, endpoint_type)
         elif provider == "local":
             model = models_config.get("local", "")
             url = config.get("local_url")
@@ -1156,6 +1218,8 @@ class AiAgentHaAgent:
             token = self.config.get("anthropic_token")
         elif provider == "alter":
             token = self.config.get("alter_token")
+        elif provider == "zai":
+            token = self.config.get("zai_token")
         elif provider == "local":
             token = self.config.get("local_url")
         else:
@@ -2511,7 +2575,7 @@ Then restart Home Assistant to see your new dashboard in the sidebar."""
             return {"error": f"Error updating dashboard: {str(e)}"}
 
     async def process_query(
-        self, user_query: str, provider: Optional[str] = None
+        self, user_query: str, provider: Optional[str] = None, debug: bool = False
     ) -> Dict[str, Any]:
         """Process a user query with input validation and rate limiting."""
         try:
@@ -2568,6 +2632,11 @@ Then restart Home Assistant to see your new dashboard in the sidebar."""
                     "model": models_config.get("alter", ""),
                     "client_class": AlterClient,
                 },
+                "zai": {
+                    "token_key": "zai_token",
+                    "model": models_config.get("zai", ""),
+                    "client_class": ZaiClient,
+                },
                 "local": {
                     "token_key": "local_url",
                     "model": models_config.get("local", ""),
@@ -2585,38 +2654,64 @@ Then restart Home Assistant to see your new dashboard in the sidebar."""
             provider_settings = provider_config[selected_provider]
             token = self.config.get(provider_settings["token_key"])
 
+            def _with_debug(result: Dict[str, Any]) -> Dict[str, Any]:
+                """Attach a sanitized trace when UI requests debug info."""
+                if debug and "debug" not in result:
+                    result["debug"] = self._build_debug_trace(
+                        selected_provider,
+                        provider_settings,
+                        config.get("zai_endpoint", "general"),
+                    )
+                return result
+
             # Validate token/URL
             if not token:
                 error_msg = f"No {'URL' if selected_provider == 'local' else 'token'} configured for provider {selected_provider}"
                 _LOGGER.error(error_msg)
-                return {"success": False, "error": error_msg}
+                return _with_debug({"success": False, "error": error_msg})
 
             # Initialize client
             try:
-                if selected_provider == "local":
+                if selected_provider == "zai":
+                    # ZaiClient takes (token, model, endpoint_type)
+                    endpoint_type = config.get("zai_endpoint", "general")
+                    self.ai_client = provider_settings["client_class"](
+                        token=token,
+                        model=provider_settings["model"],
+                        endpoint_type=endpoint_type,
+                    )
+                    _LOGGER.debug(
+                        f"Initialized {selected_provider} client with model {provider_settings['model']}, endpoint_type {endpoint_type}"
+                    )
+                elif selected_provider == "local":
                     # LocalClient takes (url, model)
                     self.ai_client = provider_settings["client_class"](
                         url=token, model=provider_settings["model"]
+                    )
+                    _LOGGER.debug(
+                        f"Initialized {selected_provider} client with model {provider_settings['model']}"
                     )
                 else:
                     # Other clients take (token, model)
                     self.ai_client = provider_settings["client_class"](
                         token=token, model=provider_settings["model"]
                     )
-                _LOGGER.debug(
-                    f"Initialized {selected_provider} client with model {provider_settings['model']}"
-                )
+                    _LOGGER.debug(
+                        f"Initialized {selected_provider} client with model {provider_settings['model']}"
+                    )
             except Exception as e:
                 error_msg = f"Error initializing {selected_provider} client: {str(e)}"
                 _LOGGER.error(error_msg)
-                return {"success": False, "error": error_msg}
+                return _with_debug({"success": False, "error": error_msg})
 
             # Process the query with rate limiting and retries
             if not self._check_rate_limit():
-                return {
-                    "success": False,
-                    "error": "Rate limit exceeded. Please wait before trying again.",
-                }
+                return _with_debug(
+                    {
+                        "success": False,
+                        "error": "Rate limit exceeded. Please wait before trying again.",
+                    }
+                )
 
             # Sanitize user input
             user_query = user_query.strip()[:1000]  # Limit length and trim whitespace
@@ -2624,7 +2719,7 @@ Then restart Home Assistant to see your new dashboard in the sidebar."""
             _LOGGER.debug("Processing new query: %s", user_query)
 
             # Check cache for identical query
-            cache_key = f"query_{hash(user_query)}"
+            cache_key = f"query_{hash(user_query)}_{provider}_{debug}"
             cached_result = self._get_cached_data(cache_key)
             if cached_result:
                 return (
@@ -2891,7 +2986,9 @@ Then restart Home Assistant to see your new dashboard in the sidebar."""
 
                             # Check if any data request resulted in an error
                             if isinstance(data, dict) and "error" in data:
-                                return {"success": False, "error": data["error"]}
+                                return _with_debug(
+                                    {"success": False, "error": data["error"]}
+                                )
                             elif isinstance(data, list) and any(
                                 "error" in item
                                 for item in data
@@ -2902,7 +2999,9 @@ Then restart Home Assistant to see your new dashboard in the sidebar."""
                                     for item in data
                                     if isinstance(item, dict) and "error" in item
                                 ]
-                                return {"success": False, "error": "; ".join(errors)}
+                                return _with_debug(
+                                    {"success": False, "error": "; ".join(errors)}
+                                )
 
                             _LOGGER.debug(
                                 "Retrieved data for request: %s",
@@ -2938,6 +3037,7 @@ Then restart Home Assistant to see your new dashboard in the sidebar."""
                                 "success": True,
                                 "answer": response_data.get("response", ""),
                             }
+                            result = _with_debug(result)
                             self._set_cached_data(cache_key, result)
                             return result
                         elif (
@@ -2962,6 +3062,7 @@ Then restart Home Assistant to see your new dashboard in the sidebar."""
                                 "success": True,
                                 "answer": json.dumps(response_data),
                             }
+                            result = _with_debug(result)
                             self._set_cached_data(cache_key, result)
                             return result
                         elif (
@@ -2986,6 +3087,7 @@ Then restart Home Assistant to see your new dashboard in the sidebar."""
                                 "success": True,
                                 "answer": json.dumps(response_data),
                             }
+                            result = _with_debug(result)
                             self._set_cached_data(cache_key, result)
                             return result
                         elif response_data.get("request_type") in [
@@ -3105,10 +3207,12 @@ Then restart Home Assistant to see your new dashboard in the sidebar."""
                                         _LOGGER.error(
                                             "Nested request returned unexpected data format"
                                         )
-                                        return {
-                                            "success": False,
-                                            "error": "Nested request returned unexpected data format",
-                                        }
+                                        return _with_debug(
+                                            {
+                                                "success": False,
+                                                "error": "Nested request returned unexpected data format",
+                                            }
+                                        )
 
                             # Handle backward compatibility with old format
                             if not domain or not service:
@@ -3159,7 +3263,9 @@ Then restart Home Assistant to see your new dashboard in the sidebar."""
 
                             # Check if service call resulted in an error
                             if isinstance(data, dict) and "error" in data:
-                                return {"success": False, "error": data["error"]}
+                                return _with_debug(
+                                    {"success": False, "error": data["error"]}
+                                )
 
                             _LOGGER.debug(
                                 "Service call completed: %s",
@@ -3173,16 +3279,20 @@ Then restart Home Assistant to see your new dashboard in the sidebar."""
                                     "content": json.dumps({"data": data}, default=str),
                                 }
                             )
+                            # Go to next iteration to continue the loop
                             continue
-                        else:
-                            _LOGGER.warning(
-                                "Unknown response type: %s",
-                                response_data.get("request_type"),
-                            )
-                            return {
+
+                        # Unknown request type
+                        _LOGGER.warning(
+                            "Unknown response type: %s",
+                            response_data.get("request_type"),
+                        )
+                        return _with_debug(
+                            {
                                 "success": False,
                                 "error": f"Unknown response type: {response_data.get('request_type')}",
                             }
+                        )
 
                     except json.JSONDecodeError as e:
                         # Check if this is a local provider that might have already wrapped the response
@@ -3271,10 +3381,12 @@ Then restart Home Assistant to see your new dashboard in the sidebar."""
                             _LOGGER.warning(
                                 "Detected corrupted automation suggestion response with repetitive text"
                             )
-                            result = {
-                                "success": False,
-                                "error": "AI generated corrupted automation response. Please try again with a more specific automation request.",
-                            }
+                            result = _with_debug(
+                                {
+                                    "success": False,
+                                    "error": "AI generated corrupted automation response. Please try again with a more specific automation request.",
+                                }
+                            )
                             self._set_cached_data(cache_key, result)
                             return result
 
@@ -3310,15 +3422,18 @@ Then restart Home Assistant to see your new dashboard in the sidebar."""
                                 "error": f"Invalid response format: {str(e)}",
                             }
 
+                        result = _with_debug(result)
                         self._set_cached_data(cache_key, result)
                         return result
 
                 except Exception as e:
                     _LOGGER.exception("Error processing AI response: %s", str(e))
-                    return {
-                        "success": False,
-                        "error": f"Error processing AI response: {str(e)}",
-                    }
+                    return _with_debug(
+                        {
+                            "success": False,
+                            "error": f"Error processing AI response: {str(e)}",
+                        }
+                    )
 
             # If we've reached max iterations without a final response
             _LOGGER.warning("Reached maximum iterations without final response")
@@ -3326,12 +3441,32 @@ Then restart Home Assistant to see your new dashboard in the sidebar."""
                 "success": False,
                 "error": "Maximum iterations reached without final response",
             }
+            result = _with_debug(result)
             self._set_cached_data(cache_key, result)
             return result
 
         except Exception as e:
             _LOGGER.exception("Error in process_query: %s", str(e))
-            return {"success": False, "error": f"Error in process_query: {str(e)}"}
+            return _with_debug(
+                {"success": False, "error": f"Error in process_query: {str(e)}"}
+            )
+
+    def _build_debug_trace(
+        self,
+        provider: Optional[str],
+        provider_settings: Optional[Dict[str, Any]],
+        endpoint_type: Optional[str],
+    ) -> Dict[str, Any]:
+        """Return a sanitized snapshot of the HA↔AI conversation for UI display."""
+        history_tail = (
+            self.conversation_history[-20:] if self.conversation_history else []
+        )
+        return {
+            "provider": provider,
+            "model": provider_settings.get("model") if provider_settings else None,
+            "endpoint_type": endpoint_type,
+            "conversation": history_tail,
+        }
 
     async def _get_ai_response(self) -> str:
         """Get response from the selected AI provider with retries and rate limiting."""

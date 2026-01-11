@@ -131,11 +131,14 @@ If you actually have thermostats or HVAC controls and they're not being found:
    - Ensure there are no extra spaces or characters
    - Check that the key hasn't expired
 
-2. **Check provider-specific requirements**:
-   - **OpenAI**: Keys start with `sk-`
-   - **Anthropic (Claude)**: Keys start with `sk-ant-`
-   - **Google Gemini**: Get key from [Google AI Studio](https://aistudio.google.com/app/apikey)
-   - **OpenRouter**: Get key from [OpenRouter](https://openrouter.ai/keys)
+ 2. **Check provider-specific requirements**:
+    - **OpenAI**: Keys start with `sk-`
+    - **Anthropic (Claude)**: Keys start with `sk-ant-`
+    - **Google Gemini**: Get key from [Google AI Studio](https://aistudio.google.com/app/apikey)
+    - **OpenRouter**: Get key from [OpenRouter](https://openrouter.ai/keys)
+    - **Alter**: Get key from [Alter HQ](https://alterhq.com)
+    - **z.ai**: Get key from [Z.ai Platform](https://z.ai/manage-apikey/apikey-list)
+    - **Llama**: Get key from your Llama provider
 
 3. **Reconfigure the integration**:
    - Go to **Settings** → **Devices & Services**
@@ -161,11 +164,14 @@ If you actually have thermostats or HVAC controls and they're not being found:
    - Model names are case-sensitive
    - Use the exact format from the provider
 
-2. **Check model availability**:
-   - **OpenAI**: See [OpenAI Models](https://platform.openai.com/docs/models)
-   - **Anthropic**: See [Claude Models](https://docs.anthropic.com/en/docs/models-overview)
-   - **Google Gemini**: See [Gemini Models](https://ai.google.dev/models)
-   - **OpenRouter**: See [OpenRouter Models](https://openrouter.ai/models)
+ 2. **Check model availability**:
+    - **OpenAI**: See [OpenAI Models](https://platform.openai.com/docs/models)
+    - **Anthropic**: See [Claude Models](https://docs.anthropic.com/en/docs/models-overview)
+    - **Google Gemini**: See [Gemini Models](https://ai.google.dev/models)
+    - **OpenRouter**: See [OpenRouter Models](https://openrouter.ai/models)
+    - **Alter**: Check your Alter provider's documentation
+    - **z.ai**: See [Z.ai Documentation](https://docs.z.ai/api-reference/introduction)
+    - **Llama**: Check your Llama provider's documentation
 
 3. **Try a predefined model**:
    - In AI Agent HA settings, use the dropdown to select a predefined model
@@ -189,11 +195,12 @@ If you actually have thermostats or HVAC controls and they're not being found:
    - Test connectivity: `ping api.openai.com` (or your provider's API endpoint)
    - Check firewall rules
 
-2. **Verify provider status**:
-   - Check if your AI provider is experiencing outages
-   - OpenAI: https://status.openai.com/
-   - Anthropic: https://status.anthropic.com/
-   - Google: https://status.cloud.google.com/
+ 2. **Verify provider status**:
+    - Check if your AI provider is experiencing outages
+    - OpenAI: https://status.openai.com/
+    - Anthropic: https://status.anthropic.com/
+    - Google: https://status.cloud.google.com/
+    - z.ai: Check [Z.ai status page](https://docs.z.ai)
 
 3. **Simplify your request**:
    - Complex requests may take longer to process

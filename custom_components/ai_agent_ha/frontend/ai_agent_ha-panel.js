@@ -13,6 +13,7 @@ const PROVIDERS = {
   openrouter: "OpenRouter",
   anthropic: "Anthropic",
   alter: "Alter",
+  zai: "z.ai",
   local: "Local Model",
 };
 
@@ -32,7 +33,10 @@ class AiAgentHaPanel extends LitElement {
       _selectedPrompts: { type: Array, reflect: false, attribute: false },
       _selectedProvider: { type: String, reflect: false, attribute: false },
       _availableProviders: { type: Array, reflect: false, attribute: false },
-      _showProviderDropdown: { type: Boolean, reflect: false, attribute: false }
+      _showProviderDropdown: { type: Boolean, reflect: false, attribute: false },
+      _showThinking: { type: Boolean, reflect: false, attribute: false },
+      _thinkingExpanded: { type: Boolean, reflect: false, attribute: false },
+      _debugInfo: { type: Object, reflect: false, attribute: false }
     };
   }
 
@@ -343,6 +347,76 @@ class AiAgentHaPanel extends LitElement {
         color: var(--secondary-text-color);
         margin-right: 8px;
       }
+      .thinking-toggle {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        font-size: 12px;
+        color: var(--secondary-text-color);
+        cursor: pointer;
+        user-select: none;
+      }
+      .thinking-toggle input {
+        margin: 0;
+      }
+      .thinking-panel {
+        border: 1px dashed var(--divider-color);
+        border-radius: 10px;
+        padding: 10px 12px;
+        margin: 12px 0;
+        background: var(--secondary-background-color);
+      }
+      .thinking-header {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        cursor: pointer;
+        gap: 10px;
+      }
+      .thinking-title {
+        font-weight: 600;
+        color: var(--primary-text-color);
+        font-size: 14px;
+      }
+      .thinking-subtitle {
+        display: block;
+        font-size: 12px;
+        color: var(--secondary-text-color);
+        margin-top: 2px;
+      }
+      .thinking-body {
+        margin-top: 10px;
+        display: flex;
+        flex-direction: column;
+        gap: 10px;
+        max-height: 240px;
+        overflow-y: auto;
+      }
+      .thinking-entry {
+        border: 1px solid var(--divider-color);
+        border-radius: 8px;
+        padding: 8px;
+        background: var(--primary-background-color);
+      }
+      .thinking-entry .badge {
+        display: inline-block;
+        background: var(--secondary-background-color);
+        color: var(--secondary-text-color);
+        font-size: 11px;
+        padding: 2px 6px;
+        border-radius: 6px;
+        margin-bottom: 6px;
+      }
+      .thinking-entry pre {
+        margin: 0;
+        white-space: pre-wrap;
+        word-break: break-word;
+        font-size: 12px;
+      }
+      .thinking-empty {
+        color: var(--secondary-text-color);
+        font-size: 12px;
+      }
       .send-button {
         --mdc-theme-primary: var(--primary-color);
         --mdc-theme-on-primary: var(--text-primary-color);
@@ -567,6 +641,9 @@ class AiAgentHaPanel extends LitElement {
     this.providersLoaded = false;
     this._eventSubscriptionSetup = false;
     this._serviceCallTimeout = null;
+    this._showThinking = false;
+    this._thinkingExpanded = false;
+    this._debugInfo = null;
     console.debug("AI Agent HA Panel constructor called");
   }
 
@@ -624,37 +701,27 @@ class AiAgentHaPanel extends LitElement {
         );
 
         if (aiAgentEntries.length > 0) {
-          // More robust approach: extract provider from entry data or use title mapping as fallback
-          this._availableProviders = aiAgentEntries.map(entry => {
-            let provider = "unknown";
-            
-            // First try to get provider from entry data
-            if (entry.data && entry.data.ai_provider) {
-              provider = entry.data.ai_provider;
-            } else {
-              // Fallback to title mapping
-              const titleToProviderMap = {
-                "AI Agent HA (OpenRouter)": "openrouter",
-                "AI Agent HA (Google Gemini)": "gemini",
-                "AI Agent HA (OpenAI)": "openai",
-                "AI Agent HA (Llama)": "llama",
-                "AI Agent HA (Anthropic (Claude))": "anthropic",
-                "AI Agent HA (Alter)": "alter",
-                "AI Agent HA (Local Model)": "local",
+          const providers = aiAgentEntries
+            .map(entry => {
+              const provider = this._resolveProviderFromEntry(entry);
+              if (!provider) return null;
+
+              return {
+                value: provider,
+                label: PROVIDERS[provider] || provider
               };
-              provider = titleToProviderMap[entry.title] || "unknown";
-            }
-            
-            return {
-              value: provider,
-              label: PROVIDERS[provider] || provider
-            };
-          });
+            })
+            .filter(Boolean);
+
+          this._availableProviders = providers;
 
           console.debug("Available AI providers (mapped from data/title):", this._availableProviders);
 
-          if (!this._selectedProvider && this._availableProviders.length > 0) {
-            this._selectedProvider = this._availableProviders[0].value;
+          if (
+            (!this._selectedProvider || !providers.find(p => p.value === this._selectedProvider)) &&
+            providers.length > 0
+          ) {
+            this._selectedProvider = providers[0].value;
           }
         } else {
           console.debug("No 'ai_agent_ha' config entries found via WebSocket.");
@@ -956,6 +1023,7 @@ class AiAgentHaPanel extends LitElement {
             ${this._error ? html`
               <div class="error">${this._error}</div>
             ` : ''}
+            ${this._showThinking ? this._renderThinkingPanel() : ''}
           </div>
           ${this._renderPromptsSection()}
           <div class="input-container">
@@ -989,6 +1057,14 @@ class AiAgentHaPanel extends LitElement {
                   `)}
                 </select>
               </div>
+              <label class="thinking-toggle">
+                <input
+                  type="checkbox"
+                  .checked=${this._showThinking}
+                  @change=${(e) => this._toggleShowThinking(e)}
+                />
+                Show thinking
+              </label>
 
               <ha-button
                 class="send-button"
@@ -1059,6 +1135,8 @@ class AiAgentHaPanel extends LitElement {
     promptEl.style.height = 'auto';
     this._isLoading = true;
     this._error = null;
+    this._debugInfo = null;
+    this._thinkingExpanded = false; // keep collapsed until a trace arrives
 
     // Clear any existing timeout
     if (this._serviceCallTimeout) {
@@ -1083,7 +1161,8 @@ class AiAgentHaPanel extends LitElement {
       console.debug("Calling ai_agent_ha service");
       await this.hass.callService('ai_agent_ha', 'query', {
         prompt: prompt,
-        provider: this._selectedProvider
+        provider: this._selectedProvider,
+        debug: this._showThinking
       });
     } catch (error) {
       console.error("Error calling service:", error);
@@ -1109,6 +1188,10 @@ class AiAgentHaPanel extends LitElement {
     
     try {
       this._clearLoadingState();
+      this._debugInfo = this._showThinking ? (event.data.debug || null) : null;
+      if (this._showThinking && this._debugInfo) {
+        this._thinkingExpanded = true;
+      }
     if (event.data.success) {
       // Check if the answer is empty
       if (!event.data.answer || event.data.answer.trim() === '') {
@@ -1286,7 +1369,56 @@ class AiAgentHaPanel extends LitElement {
     this._clearLoadingState();
     this._error = null;
     this._pendingAutomation = null;
+    this._debugInfo = null;
     // Don't clear prompt history - users might want to keep it
+  }
+
+  _resolveProviderFromEntry(entry) {
+    if (!entry) return null;
+
+    const providerFromData = entry.data?.ai_provider || entry.options?.ai_provider;
+    if (providerFromData && PROVIDERS[providerFromData]) {
+      return providerFromData;
+    }
+
+    const uniqueId = entry.unique_id || entry.uniqueId;
+    if (uniqueId && uniqueId.startsWith("ai_agent_ha_")) {
+      const fromUniqueId = uniqueId.replace("ai_agent_ha_", "");
+      if (PROVIDERS[fromUniqueId]) {
+        return fromUniqueId;
+      }
+    }
+
+    const titleMap = {
+      "ai agent ha (openrouter)": "openrouter",
+      "ai agent ha (google gemini)": "gemini",
+      "ai agent ha (openai)": "openai",
+      "ai agent ha (llama)": "llama",
+      "ai agent ha (anthropic (claude))": "anthropic",
+      "ai agent ha (alter)": "alter",
+      "ai agent ha (z.ai)": "zai",
+      "ai agent ha (local model)": "local",
+    };
+
+    if (entry.title) {
+      const lowerTitle = entry.title.toLowerCase();
+      if (titleMap[lowerTitle]) {
+        return titleMap[lowerTitle];
+      }
+
+      const match = entry.title.match(/\(([^)]+)\)/);
+      if (match && match[1]) {
+        const normalized = match[1].toLowerCase().replace(/[^a-z0-9]/g, "");
+        const providerKey = Object.keys(PROVIDERS).find(
+          key => key.replace(/[^a-z0-9]/g, "") === normalized
+        );
+        if (providerKey) {
+          return providerKey;
+        }
+      }
+    }
+
+    return null;
   }
 
   _getProviderInfo(providerId) {
@@ -1295,6 +1427,54 @@ class AiAgentHaPanel extends LitElement {
 
   _hasProviders() {
     return this._availableProviders && this._availableProviders.length > 0;
+  }
+
+  _toggleThinkingPanel() {
+    this._thinkingExpanded = !this._thinkingExpanded;
+  }
+
+  _toggleShowThinking(e) {
+    this._showThinking = e.target.checked;
+    if (!this._showThinking) {
+      this._thinkingExpanded = false;
+    }
+  }
+
+  _renderThinkingPanel() {
+    if (!this._debugInfo) {
+      return '';
+    }
+
+    const subtitleParts = [];
+    if (this._debugInfo.provider) subtitleParts.push(this._debugInfo.provider);
+    if (this._debugInfo.model) subtitleParts.push(this._debugInfo.model);
+    if (this._debugInfo.endpoint_type) subtitleParts.push(this._debugInfo.endpoint_type);
+    const subtitle = subtitleParts.join(" · ");
+    const conversation = this._debugInfo.conversation || [];
+
+    return html`
+      <div class="thinking-panel">
+        <div class="thinking-header" @click=${() => this._toggleThinkingPanel()}>
+          <div>
+            <span class="thinking-title">Thinking trace</span>
+            ${subtitle ? html`<span class="thinking-subtitle">${subtitle}</span>` : ''}
+          </div>
+          <ha-icon icon=${this._thinkingExpanded ? 'mdi:chevron-up' : 'mdi:chevron-down'}></ha-icon>
+        </div>
+        ${this._thinkingExpanded ? html`
+          <div class="thinking-body">
+            ${conversation.length === 0 ? html`
+              <div class="thinking-empty">No trace captured.</div>
+            ` : conversation.map((entry, index) => html`
+              <div class="thinking-entry">
+                <div class="badge">${entry.role || 'unknown'}</div>
+                <pre>${entry.content || ''}</pre>
+              </div>
+            `)}
+          </div>
+        ` : ''}
+      </div>
+    `;
   }
 }
 

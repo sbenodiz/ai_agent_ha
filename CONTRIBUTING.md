@@ -10,7 +10,7 @@ Thank you for your interest in contributing to AI Agent HA! This document provid
 - Python 3.12+
 - Git
 - Basic understanding of Home Assistant custom components
-- API keys for at least one supported AI provider (OpenAI, Google Gemini, Anthropic, OpenRouter, or Llama)
+- API keys for at least one supported AI provider (OpenAI, Google Gemini, Anthropic, OpenRouter, Alter, z.ai, or Llama)
 
 ### Development Setup
 

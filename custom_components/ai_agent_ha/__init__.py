@@ -87,6 +87,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             "openrouter",
             "anthropic",
             "alter",
+            "zai",
             "local",
         ]:
             _LOGGER.error("Unknown AI provider: %s", provider)
@@ -109,6 +110,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     "gemini_token",
                     "openrouter_token",
                     "anthropic_token",
+                    "zai_token",
                 ]
             },
         )
@@ -150,7 +152,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
             agent = hass.data[DOMAIN]["agents"][provider]
             result = await agent.process_query(
-                call.data.get("prompt", ""), provider=provider
+                call.data.get("prompt", ""),
+                provider=provider,
+                debug=call.data.get("debug", False),
             )
             hass.bus.async_fire("ai_agent_ha_response", result)
         except Exception as e:
