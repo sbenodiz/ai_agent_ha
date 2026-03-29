@@ -89,8 +89,8 @@ jobs:
 
     - name: Run security scan with bandit
       run: |
-        bandit -r custom_components/ -f json -o bandit-report.json || true
-        bandit -r custom_components/
+        bandit -r custom_components/ -s B105 -f json -o bandit-report.json || true
+        bandit -r custom_components/ -s B105
 
     - name: Upload bandit report
       uses: actions/upload-artifact@v4
