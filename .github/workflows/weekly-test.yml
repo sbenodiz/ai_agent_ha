@@ -35,7 +35,7 @@ jobs:
 
     - name: Run comprehensive tests
       run: |
-        pytest tests/ --asyncio-mode=auto --cov=custom_components/ai_agent_ha --cov-report=xml --cov-report=term-missing -v --slow
+        pytest tests/ --asyncio-mode=auto --cov=custom_components/ai_agent_ha --cov-report=xml --cov-report=term-missing -v
 
     - name: Run integration tests with real AI providers (mock)
       run: |
