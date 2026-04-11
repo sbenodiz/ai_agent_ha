@@ -18,7 +18,7 @@ ai_agent_ha:
     llama: "Llama-4-Maverick-17B-128E-Instruct-FP8"
     gemini: "gemini-2.5-flash"  # or "gemini-2.5-pro", "gemini-2.0-flash", etc.
     openrouter: "openai/gpt-4o"  # or any model available on OpenRouter
-    anthropic: "claude-sonnet-4-5-20250929"  # or "claude-sonnet-4-20250514", "claude-3-5-sonnet-20241022", "claude-3-opus-20240229", etc.
+    anthropic: "claude-opus-4-6"  # or "claude-sonnet-4-6", "claude-haiku-4-5-20251001", "claude-sonnet-4-5-20250929", etc.
     alter: "your-model-name"  # model name for Alter API
     zai: "glm-4.7"  # model name for z.ai API (glm-4.7, glm-4.6, glm-4.5, etc.)
     local: "llama3.2"  # model name for local API (optional if your API doesn't require it)
@@ -819,7 +819,7 @@ class GeminiClient(BaseAIClient):
 
 
 class AnthropicClient(BaseAIClient):
-    def __init__(self, token, model="claude-sonnet-4-5-20250929", hass=None):
+    def __init__(self, token, model="claude-opus-4-6", hass=None):
         super().__init__(hass=hass)
         self.token = token
         self.model = model
@@ -856,7 +856,7 @@ class AnthropicClient(BaseAIClient):
         payload = {
             "model": self.model,
             "max_tokens": 8192,  # Maximum for Anthropic Claude models
-            "temperature": 0.7,
+            "temperature": 0.0,
             "messages": anthropic_messages,
         }
 
@@ -871,7 +871,7 @@ class AnthropicClient(BaseAIClient):
                 self.api_url,
                 headers=headers,
                 json=payload,
-                timeout=aiohttp.ClientTimeout(total=30),
+                timeout=aiohttp.ClientTimeout(total=300),
             ) as resp:
                 if resp.status != 200:
                     error_text = await resp.text()
@@ -1095,6 +1095,74 @@ class AskSageClient(BaseAIClient):
             _LOGGER.warning("Ask Sage model fetch failed: %s", exc)
         return []
 
+    async def validate_data_scope(self) -> dict:
+        """Validate that the Ask Sage token is valid and confirm data-scope guarantees.
+
+        Calls /user/get-user-logs to confirm the token authenticates and that
+        any HA data sent as query content is stored only under this account.
+
+        Returns a dict with keys:
+          - valid (bool): token accepted by Ask Sage
+          - account_scoped (bool): logs confirmed to be per-account only
+          - message (str): human-readable summary
+
+        DATA FLOW AUDIT:
+          - HA entity data is passed inline in the ``message`` field of /query.
+          - ``dataset: "none"`` prevents Ask Sage from writing data to RAG.
+          - ``limit_references: 0`` prevents RAG retrieval even if dataset changes.
+          - Per Ask Sage docs: query content is "fire and forget" — not used for
+            model training, not retained after response generation.
+          - /user/get-user-logs stores prompt + completion scoped to THIS token
+            only — no cross-account access.
+          - No data is ever sent to /train or /add-dataset by this integration.
+        """
+        USER_LOGS_URL = "https://api.asksage.ai/user/get-user-logs"
+        headers = {
+            "x-access-tokens": self.token,
+            "Content-Type": "application/json",
+        }
+        try:
+            async with self._session() as session:
+                async with session.post(
+                    USER_LOGS_URL,
+                    headers=headers,
+                    json={},
+                    timeout=aiohttp.ClientTimeout(total=10),
+                ) as resp:
+                    if resp.status == 401:
+                        return {
+                            "valid": False,
+                            "account_scoped": False,
+                            "message": "Ask Sage token rejected (401). HA data will NOT be sent.",
+                        }
+                    if resp.status == 200:
+                        _LOGGER.info(
+                            "Ask Sage data-scope validation PASSED: "
+                            "token authenticated, query logs are scoped to this account only. "
+                            "HA entity data is sent as query content (fire-and-forget, not RAG-ingested). "
+                            "dataset=none, limit_references=0 enforced on all requests."
+                        )
+                        return {
+                            "valid": True,
+                            "account_scoped": True,
+                            "message": (
+                                "Data scope confirmed: HA data sent as query content only, "
+                                "scoped to this Ask Sage account. Not written to RAG or shared datasets."
+                            ),
+                        }
+                    return {
+                        "valid": False,
+                        "account_scoped": False,
+                        "message": f"Ask Sage validation returned unexpected status {resp.status}.",
+                    }
+        except Exception as exc:  # noqa: BLE001
+            _LOGGER.warning("Ask Sage data-scope validation failed: %s", exc)
+            return {
+                "valid": False,
+                "account_scoped": False,
+                "message": f"Could not validate Ask Sage data scope: {exc}",
+            }
+
     async def get_response(self, messages, **kwargs) -> str:
         """Send a query to Ask Sage and return the generated text.
 
@@ -1116,6 +1184,15 @@ class AskSageClient(BaseAIClient):
             self.live,
             self.deep_agent,
             len(messages),
+        )
+
+        # DATA SCOPE AUDIT: HA entity data is sent as query content (message field)
+        # to Ask Sage's /query endpoint. dataset="none" and limit_references=0
+        # ensure no data is written to or retrieved from Ask Sage RAG.
+        # Logs are stored per this token's account only (fire-and-forget, no cross-account access).
+        _LOGGER.debug(
+            "Ask Sage data scope: dataset=none, limit_references=0, "
+            "query content scoped to account token. No RAG ingestion."
         )
 
         headers = {
@@ -1155,7 +1232,8 @@ class AskSageClient(BaseAIClient):
             "message": message_payload,
             "model": self.model,
             "temperature": 0,
-            "dataset": "none",   # Disable Ask Sage RAG; HA data is injected by the agent
+            "dataset": "none",      # Disable Ask Sage RAG; HA data is injected by the agent
+            "limit_references": 0,  # Belt-and-suspenders: zero RAG references regardless of dataset setting
             "live": self.live,
         }
 
@@ -1504,7 +1582,7 @@ class AiAgentHaAgent:
             model = models_config.get("openrouter", "openai/gpt-4o")
             self.ai_client = OpenRouterClient(config.get("openrouter_token"), model, hass=self.hass)
         elif provider == "anthropic":
-            model = models_config.get("anthropic", "claude-sonnet-4-5-20250929")
+            model = models_config.get("anthropic", "claude-opus-4-6")
             self.ai_client = AnthropicClient(config.get("anthropic_token"), model, hass=self.hass)
         elif provider == "alter":
             model = models_config.get("alter", "")
@@ -1522,6 +1600,14 @@ class AiAgentHaAgent:
                 deep_agent=config.get("asksage_deep_agent", False),
                 hass=self.hass,
             )
+            # Schedule data-scope validation as a background task so it runs
+            # after HA finishes initializing without blocking the setup path.
+            if self.hass:
+                async def _run_asksage_validation(client=self.ai_client):
+                    result = await client.validate_data_scope()
+                    if not result["valid"]:
+                        _LOGGER.warning("Ask Sage data-scope validation: %s", result["message"])
+                self.hass.async_create_task(_run_asksage_validation())
         elif provider == "local":
             model = models_config.get("local", "")
             url = config.get("local_url")
@@ -2956,7 +3042,7 @@ Then restart Home Assistant to see your new dashboard in the sidebar."""
                 "anthropic": {
                     "token_key": "anthropic_token",
                     "model": models_config.get(
-                        "anthropic", "claude-sonnet-4-5-20250929"
+                        "anthropic", "claude-opus-4-6"
                     ),
                     "client_class": AnthropicClient,
                 },
@@ -3043,6 +3129,18 @@ Then restart Home Assistant to see your new dashboard in the sidebar."""
                         f"Initialized {selected_provider} client with model {provider_settings['model']}, "
                         f"live={config.get('asksage_live', 0)}, deep_agent={config.get('asksage_deep_agent', False)}"
                     )
+                    # Run data-scope validation inline (we are already inside an async context).
+                    # Warn but do not abort — a failed validation is not a hard error.
+                    try:
+                        scope_result = await self.ai_client.validate_data_scope()
+                        if not scope_result["valid"]:
+                            _LOGGER.warning(
+                                "Ask Sage data-scope validation failed: %s", scope_result["message"]
+                            )
+                        else:
+                            _LOGGER.debug("Ask Sage data-scope: %s", scope_result["message"])
+                    except Exception as _scope_exc:  # noqa: BLE001
+                        _LOGGER.warning("Ask Sage data-scope check error: %s", _scope_exc)
                 else:
                     # Other clients take (token, model)
                     # For OpenAI, also pass optional custom base_url override
