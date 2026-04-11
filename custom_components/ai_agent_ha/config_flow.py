@@ -56,7 +56,9 @@ TOKEN_FIELD_NAMES = {
     "asksage": CONF_ASKSAGE_TOKEN,
 }
 
-OPENAI_BASE_URL_LABEL = "Custom Base URL (optional, e.g. http://192.168.0.57:1234/v1 for LM Studio)"
+OPENAI_BASE_URL_LABEL = (
+    "Custom Base URL (optional, e.g. http://192.168.0.57:1234/v1 for LM Studio)"
+)
 
 TOKEN_LABELS = {
     "llama": "Llama API Token",
@@ -365,6 +367,7 @@ class AiAgentHaConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):  # type: ig
             # Fetch live model list from Ask Sage /get-models (public endpoint,
             # no auth required). Filter out any model whose id contains "gov".
             import aiohttp
+
             live_models = []
             try:
                 async with aiohttp.ClientSession() as session:
@@ -376,7 +379,8 @@ class AiAgentHaConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):  # type: ig
                             data = await resp.json()
                             raw = data.get("data", [])
                             live_models = [
-                                m["id"] for m in raw
+                                m["id"]
+                                for m in raw
                                 if isinstance(m, dict)
                                 and "id" in m
                                 and "gov" not in m["id"].lower()
@@ -399,9 +403,9 @@ class AiAgentHaConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):  # type: ig
                 vol.Required(CONF_ASKSAGE_TOKEN): TextSelector(
                     TextSelectorConfig(type="password")
                 ),
-                vol.Optional("model", default=DEFAULT_MODELS["asksage"]): SelectSelector(
-                    SelectSelectorConfig(options=model_options)
-                ),
+                vol.Optional(
+                    "model", default=DEFAULT_MODELS["asksage"]
+                ): SelectSelector(SelectSelectorConfig(options=model_options)),
                 vol.Optional("custom_model"): TextSelector(
                     TextSelectorConfig(type="text")
                 ),
@@ -410,7 +414,9 @@ class AiAgentHaConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):  # type: ig
                         options=[
                             SelectOptionDict(value="0", label="Off"),
                             SelectOptionDict(value="1", label="Live (Google)"),
-                            SelectOptionDict(value="2", label="Live+ (Google + web crawl)"),
+                            SelectOptionDict(
+                                value="2", label="Live+ (Google + web crawl)"
+                            ),
                         ]
                     )
                 ),
@@ -623,8 +629,12 @@ class AiAgentHaOptionsFlowHandler(config_entries.OptionsFlow):
                 vol.Optional("custom_model"): TextSelector(
                     TextSelectorConfig(type="text")
                 ),
-                vol.Optional(CONF_PERSIST_CHAT_HISTORY, default=current_persist): BooleanSelector(),
-                vol.Optional(CONF_ENABLE_STREAMING, default=current_streaming): BooleanSelector(),
+                vol.Optional(
+                    CONF_PERSIST_CHAT_HISTORY, default=current_persist
+                ): BooleanSelector(),
+                vol.Optional(
+                    CONF_ENABLE_STREAMING, default=current_streaming
+                ): BooleanSelector(),
             }
 
             return self.async_show_form(
@@ -657,8 +667,12 @@ class AiAgentHaOptionsFlowHandler(config_entries.OptionsFlow):
             schema_dict[vol.Optional("custom_model")] = TextSelector(
                 TextSelectorConfig(type="text")
             )
-            schema_dict[vol.Optional(CONF_PERSIST_CHAT_HISTORY, default=current_persist)] = BooleanSelector()
-            schema_dict[vol.Optional(CONF_ENABLE_STREAMING, default=current_streaming)] = BooleanSelector()
+            schema_dict[
+                vol.Optional(CONF_PERSIST_CHAT_HISTORY, default=current_persist)
+            ] = BooleanSelector()
+            schema_dict[
+                vol.Optional(CONF_ENABLE_STREAMING, default=current_streaming)
+            ] = BooleanSelector()
 
             return self.async_show_form(
                 step_id="configure_options",
@@ -673,6 +687,7 @@ class AiAgentHaOptionsFlowHandler(config_entries.OptionsFlow):
         if provider == "asksage":
             # Fetch live model list, filter out gov models
             import aiohttp
+
             live_models = []
             try:
                 async with aiohttp.ClientSession() as session:
@@ -684,7 +699,8 @@ class AiAgentHaOptionsFlowHandler(config_entries.OptionsFlow):
                             data = await resp.json()
                             raw = data.get("data", [])
                             live_models = [
-                                m["id"] for m in raw
+                                m["id"]
+                                for m in raw
                                 if isinstance(m, dict)
                                 and "id" in m
                                 and "gov" not in m["id"].lower()
@@ -699,7 +715,9 @@ class AiAgentHaOptionsFlowHandler(config_entries.OptionsFlow):
                 model_options = model_options + ["Custom..."]
 
             current_live = self.config_entry.data.get(CONF_ASKSAGE_LIVE, 0)
-            current_deep_agent = self.config_entry.data.get(CONF_ASKSAGE_DEEP_AGENT, False)
+            current_deep_agent = self.config_entry.data.get(
+                CONF_ASKSAGE_DEEP_AGENT, False
+            )
 
             schema_dict = {
                 vol.Required(CONF_ASKSAGE_TOKEN, default=display_token): TextSelector(
@@ -716,13 +734,21 @@ class AiAgentHaOptionsFlowHandler(config_entries.OptionsFlow):
                         options=[
                             SelectOptionDict(value="0", label="Off"),
                             SelectOptionDict(value="1", label="Live (Google)"),
-                            SelectOptionDict(value="2", label="Live+ (Google + web crawl)"),
+                            SelectOptionDict(
+                                value="2", label="Live+ (Google + web crawl)"
+                            ),
                         ]
                     )
                 ),
-                vol.Optional(CONF_ASKSAGE_DEEP_AGENT, default=current_deep_agent): BooleanSelector(),
-                vol.Optional(CONF_PERSIST_CHAT_HISTORY, default=current_persist): BooleanSelector(),
-                vol.Optional(CONF_ENABLE_STREAMING, default=current_streaming): BooleanSelector(),
+                vol.Optional(
+                    CONF_ASKSAGE_DEEP_AGENT, default=current_deep_agent
+                ): BooleanSelector(),
+                vol.Optional(
+                    CONF_PERSIST_CHAT_HISTORY, default=current_persist
+                ): BooleanSelector(),
+                vol.Optional(
+                    CONF_ENABLE_STREAMING, default=current_streaming
+                ): BooleanSelector(),
             }
 
             return self.async_show_form(
@@ -745,9 +771,9 @@ class AiAgentHaOptionsFlowHandler(config_entries.OptionsFlow):
         # For OpenAI provider, add optional custom base URL override
         if provider == "openai":
             current_base_url = self.config_entry.data.get(CONF_OPENAI_BASE_URL, "")
-            schema_dict[vol.Optional(CONF_OPENAI_BASE_URL, default=current_base_url)] = TextSelector(
-                TextSelectorConfig(type="url")
-            )
+            schema_dict[
+                vol.Optional(CONF_OPENAI_BASE_URL, default=current_base_url)
+            ] = TextSelector(TextSelectorConfig(type="url"))
 
         # Add model selection if available
         if available_models:
@@ -763,8 +789,12 @@ class AiAgentHaOptionsFlowHandler(config_entries.OptionsFlow):
                 TextSelectorConfig(type="text")
             )
 
-        schema_dict[vol.Optional(CONF_PERSIST_CHAT_HISTORY, default=current_persist)] = BooleanSelector()
-        schema_dict[vol.Optional(CONF_ENABLE_STREAMING, default=current_streaming)] = BooleanSelector()
+        schema_dict[
+            vol.Optional(CONF_PERSIST_CHAT_HISTORY, default=current_persist)
+        ] = BooleanSelector()
+        schema_dict[vol.Optional(CONF_ENABLE_STREAMING, default=current_streaming)] = (
+            BooleanSelector()
+        )
 
         return self.async_show_form(
             step_id="configure_options",
