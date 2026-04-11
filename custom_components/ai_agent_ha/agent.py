@@ -488,7 +488,9 @@ class LocalClient(BaseAIClient):
 
 
 class LlamaClient(BaseAIClient):
-    def __init__(self, token, model="Llama-4-Maverick-17B-128E-Instruct-FP8", hass=None):
+    def __init__(
+        self, token, model="Llama-4-Maverick-17B-128E-Instruct-FP8", hass=None
+    ):
         super().__init__(hass=hass)
         self.token = token
         self.model = model
