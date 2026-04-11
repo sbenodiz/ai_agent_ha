@@ -1152,7 +1152,9 @@ class AiAgentHaAgent:
         self._last_request_time = 0
         self._request_count = 0
         self._request_window_start = time.time()
-        self._max_history_len = 50  # Max conversation_history entries (system prompt + 49 turns)
+        self._max_history_len = (
+            50  # Max conversation_history entries (system prompt + 49 turns)
+        )
 
         provider = config.get("ai_provider", "openai")
         models_config = config.get("models", {})
@@ -1244,10 +1246,9 @@ class AiAgentHaAgent:
         """
         if len(self.conversation_history) > self._max_history_len:
             tail_size = self._max_history_len - 1
-            self.conversation_history = (
-                [self.conversation_history[0]]
-                + self.conversation_history[-tail_size:]
-            )
+            self.conversation_history = [
+                self.conversation_history[0]
+            ] + self.conversation_history[-tail_size:]
 
     def _check_rate_limit(self) -> bool:
         """Check if we're within rate limits."""
