@@ -129,15 +129,21 @@ class BaseAIClient:
             The response with all thinking blocks removed and whitespace cleaned up.
         """
         import re
+
         if not text:
             return text
         # Remove <think>...</think> blocks (case-insensitive, dotall)
-        text = re.sub(r'<think>.*?</think>', '', text, flags=re.DOTALL | re.IGNORECASE)
+        text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL | re.IGNORECASE)
         # Remove <|thinking|>...</|thinking|> variant
-        text = re.sub(r'<\|thinking\|>.*?</\|thinking\|>', '', text, flags=re.DOTALL | re.IGNORECASE)
+        text = re.sub(
+            r"<\|thinking\|>.*?</\|thinking\|>",
+            "",
+            text,
+            flags=re.DOTALL | re.IGNORECASE,
+        )
         # Handle truncated blocks: remove everything from an unclosed <think> to end of string
-        text = re.sub(r'<think>.*$', '', text, flags=re.DOTALL | re.IGNORECASE)
-        text = re.sub(r'<\|thinking\|>.*$', '', text, flags=re.DOTALL | re.IGNORECASE)
+        text = re.sub(r"<think>.*$", "", text, flags=re.DOTALL | re.IGNORECASE)
+        text = re.sub(r"<\|thinking\|>.*$", "", text, flags=re.DOTALL | re.IGNORECASE)
         # Clean up leading/trailing whitespace left behind
         return text.strip()
 
@@ -190,9 +196,7 @@ class LocalClient(BaseAIClient):
             if self.model:
                 payload["model"] = self.model
             request_url = self._chat_url
-            _LOGGER.debug(
-                "Using OpenAI-compatible format → POST %s", request_url
-            )
+            _LOGGER.debug("Using OpenAI-compatible format → POST %s", request_url)
         else:
             # Legacy Ollama-native format: flatten messages into a prompt string
             prompt = ""
@@ -214,9 +218,7 @@ class LocalClient(BaseAIClient):
             if self.model:
                 payload["model"] = self.model
             request_url = self.url
-            _LOGGER.debug(
-                "Using Ollama-native format → POST %s", request_url
-            )
+            _LOGGER.debug("Using Ollama-native format → POST %s", request_url)
 
         # Note: Payloads don't contain auth tokens (those are in headers), but may contain user prompts
         _LOGGER.debug("Local API request payload: %s", json.dumps(payload, indent=2))
@@ -280,7 +282,9 @@ class LocalClient(BaseAIClient):
                         # Try common response formats
                         # Ollama format - return only the response text
                         if "response" in data:
-                            response_content = self.strip_thinking_tags(data["response"])
+                            response_content = self.strip_thinking_tags(
+                                data["response"]
+                            )
                             _LOGGER.debug(
                                 "Extracted response content: %s",
                                 (
@@ -363,7 +367,9 @@ class LocalClient(BaseAIClient):
                         elif "choices" in data and len(data["choices"]) > 0:
                             choice = data["choices"][0]
                             if "message" in choice and "content" in choice["message"]:
-                                content = self.strip_thinking_tags(choice["message"]["content"])
+                                content = self.strip_thinking_tags(
+                                    choice["message"]["content"]
+                                )
                             elif "text" in choice:
                                 content = self.strip_thinking_tags(choice["text"])
                             else:
@@ -458,7 +464,9 @@ class LocalClient(BaseAIClient):
                                 isinstance(message_content, dict)
                                 and "content" in message_content
                             ):
-                                content = self.strip_thinking_tags(message_content["content"])
+                                content = self.strip_thinking_tags(
+                                    message_content["content"]
+                                )
                             else:
                                 content = self.strip_thinking_tags(str(message_content))
                             return json.dumps(
@@ -824,7 +832,9 @@ class AnthropicClient(BaseAIClient):
                     # Get the text from the first content block
                     for block in content_blocks:
                         if block.get("type") == "text":
-                            return self.strip_thinking_tags(block.get("text", str(data)))
+                            return self.strip_thinking_tags(
+                                block.get("text", str(data))
+                            )
                 return str(data)
 
 
@@ -875,7 +885,9 @@ class OpenRouterClient(BaseAIClient):
                     )
                     return str(data)
                 if choices and "message" in choices[0]:
-                    return self.strip_thinking_tags(choices[0]["message"].get("content", str(data)))
+                    return self.strip_thinking_tags(
+                        choices[0]["message"].get("content", str(data))
+                    )
                 return str(data)
 
 
@@ -919,7 +931,9 @@ class AlterClient(BaseAIClient):
                     _LOGGER.debug("Full Alter response: %s", json.dumps(data, indent=2))
                     return str(data)
                 if choices and "message" in choices[0]:
-                    return self.strip_thinking_tags(choices[0]["message"].get("content", str(data)))
+                    return self.strip_thinking_tags(
+                        choices[0]["message"].get("content", str(data))
+                    )
                 return str(data)
 
 
@@ -973,7 +987,9 @@ class ZaiClient(BaseAIClient):
                     _LOGGER.debug("Full z.ai response: %s", json.dumps(data, indent=2))
                     return str(data)
                 if choices and "message" in choices[0]:
-                    return self.strip_thinking_tags(choices[0]["message"].get("content", str(data)))
+                    return self.strip_thinking_tags(
+                        choices[0]["message"].get("content", str(data))
+                    )
                 return str(data)
 
 
@@ -2775,7 +2791,9 @@ Then restart Home Assistant to see your new dashboard in the sidebar."""
                     if selected_provider == "openai":
                         base_url = config.get("openai_base_url", "") or ""
                         self.ai_client = provider_settings["client_class"](
-                            token=token, model=provider_settings["model"], base_url=base_url
+                            token=token,
+                            model=provider_settings["model"],
+                            base_url=base_url,
                         )
                     else:
                         self.ai_client = provider_settings["client_class"](
