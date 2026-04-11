@@ -115,6 +115,7 @@ def sanitize_for_logging(data: Any, mask: str = "***REDACTED***") -> Any:
 
 # === AI Client Abstractions ===
 
+
 class _HASessionContext:
     """Async context manager that wraps a shared HA aiohttp session.
 
@@ -168,11 +169,13 @@ class BaseAIClient:
         """
         if not text:
             return None
-        match = re.search(r'<think>(.*?)</think>', text, re.DOTALL | re.IGNORECASE)
+        match = re.search(r"<think>(.*?)</think>", text, re.DOTALL | re.IGNORECASE)
         if match:
             return match.group(1).strip()
         # Also check <|thinking|> variant
-        match = re.search(r'<\|thinking\|>(.*?)</\|thinking\|>', text, re.DOTALL | re.IGNORECASE)
+        match = re.search(
+            r"<\|thinking\|>(.*?)</\|thinking\|>", text, re.DOTALL | re.IGNORECASE
+        )
         if match:
             return match.group(1).strip()
         return None
@@ -196,12 +199,17 @@ class BaseAIClient:
         if not text:
             return text
         # Remove <think>...</think> blocks (case-insensitive, dotall)
-        text = re.sub(r'<think>.*?</think>', '', text, flags=re.DOTALL | re.IGNORECASE)
+        text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL | re.IGNORECASE)
         # Remove <|thinking|>...</|thinking|> variant
-        text = re.sub(r'<\|thinking\|>.*?</\|thinking\|>', '', text, flags=re.DOTALL | re.IGNORECASE)
+        text = re.sub(
+            r"<\|thinking\|>.*?</\|thinking\|>",
+            "",
+            text,
+            flags=re.DOTALL | re.IGNORECASE,
+        )
         # Handle truncated blocks: remove everything from an unclosed <think> to end of string
-        text = re.sub(r'<think>.*$', '', text, flags=re.DOTALL | re.IGNORECASE)
-        text = re.sub(r'<\|thinking\|>.*$', '', text, flags=re.DOTALL | re.IGNORECASE)
+        text = re.sub(r"<think>.*$", "", text, flags=re.DOTALL | re.IGNORECASE)
+        text = re.sub(r"<\|thinking\|>.*$", "", text, flags=re.DOTALL | re.IGNORECASE)
         # Clean up leading/trailing whitespace left behind
         return text.strip()
 
@@ -255,9 +263,7 @@ class LocalClient(BaseAIClient):
             if self.model:
                 payload["model"] = self.model
             request_url = self._chat_url
-            _LOGGER.debug(
-                "Using OpenAI-compatible format → POST %s", request_url
-            )
+            _LOGGER.debug("Using OpenAI-compatible format → POST %s", request_url)
         else:
             # Legacy Ollama-native format: flatten messages into a prompt string
             prompt = ""
@@ -279,9 +285,7 @@ class LocalClient(BaseAIClient):
             if self.model:
                 payload["model"] = self.model
             request_url = self.url
-            _LOGGER.debug(
-                "Using Ollama-native format → POST %s", request_url
-            )
+            _LOGGER.debug("Using Ollama-native format → POST %s", request_url)
 
         # Note: Payloads don't contain auth tokens (those are in headers), but may contain user prompts
         _LOGGER.debug("Local API request payload: %s", json.dumps(payload, indent=2))
@@ -345,7 +349,9 @@ class LocalClient(BaseAIClient):
                         # Try common response formats
                         # Ollama format - return only the response text
                         if "response" in data:
-                            response_content = self.strip_thinking_tags(data["response"])
+                            response_content = self.strip_thinking_tags(
+                                data["response"]
+                            )
                             _LOGGER.debug(
                                 "Extracted response content: %s",
                                 (
@@ -428,7 +434,9 @@ class LocalClient(BaseAIClient):
                         elif "choices" in data and len(data["choices"]) > 0:
                             choice = data["choices"][0]
                             if "message" in choice and "content" in choice["message"]:
-                                content = self.strip_thinking_tags(choice["message"]["content"])
+                                content = self.strip_thinking_tags(
+                                    choice["message"]["content"]
+                                )
                             elif "text" in choice:
                                 content = self.strip_thinking_tags(choice["text"])
                             else:
@@ -523,7 +531,9 @@ class LocalClient(BaseAIClient):
                                 isinstance(message_content, dict)
                                 and "content" in message_content
                             ):
-                                content = self.strip_thinking_tags(message_content["content"])
+                                content = self.strip_thinking_tags(
+                                    message_content["content"]
+                                )
                             else:
                                 content = self.strip_thinking_tags(str(message_content))
                             return json.dumps(
@@ -569,7 +579,6 @@ class LocalClient(BaseAIClient):
                     _LOGGER.error("Failed to parse local API response: %s", str(e))
                     raise Exception(f"Failed to parse local API response: {str(e)}")
 
-
     async def get_response_stream(self, messages, **kwargs):
         """SSE streaming for OpenAI-compatible local endpoints.
 
@@ -602,7 +611,9 @@ class LocalClient(BaseAIClient):
                     timeout=aiohttp.ClientTimeout(total=300),
                 ) as resp:
                     if resp.status != 200:
-                        _LOGGER.warning("Local stream error %d, falling back", resp.status)
+                        _LOGGER.warning(
+                            "Local stream error %d, falling back", resp.status
+                        )
                         result = await self.get_response(messages, **kwargs)
                         yield result
                         return
@@ -632,7 +643,9 @@ class LocalClient(BaseAIClient):
 
 
 class LlamaClient(BaseAIClient):
-    def __init__(self, token, model="Llama-4-Maverick-17B-128E-Instruct-FP8", hass=None):
+    def __init__(
+        self, token, model="Llama-4-Maverick-17B-128E-Instruct-FP8", hass=None
+    ):
         super().__init__(hass=hass)
         self.token = token
         self.model = model
@@ -962,9 +975,10 @@ class AnthropicClient(BaseAIClient):
                     # Get the text from the first content block
                     for block in content_blocks:
                         if block.get("type") == "text":
-                            return self.strip_thinking_tags(block.get("text", str(data)))
+                            return self.strip_thinking_tags(
+                                block.get("text", str(data))
+                            )
                 return str(data)
-
 
     async def get_response_stream(self, messages, **kwargs):
         """SSE streaming for the Anthropic Messages API.
@@ -1011,7 +1025,9 @@ class AnthropicClient(BaseAIClient):
                     timeout=aiohttp.ClientTimeout(total=300),
                 ) as resp:
                     if resp.status != 200:
-                        _LOGGER.warning("Anthropic stream error %d, falling back", resp.status)
+                        _LOGGER.warning(
+                            "Anthropic stream error %d, falling back", resp.status
+                        )
                         result = await self.get_response(messages, **kwargs)
                         yield result
                         return
@@ -1088,7 +1104,9 @@ class OpenRouterClient(BaseAIClient):
                     )
                     return str(data)
                 if choices and "message" in choices[0]:
-                    return self.strip_thinking_tags(choices[0]["message"].get("content", str(data)))
+                    return self.strip_thinking_tags(
+                        choices[0]["message"].get("content", str(data))
+                    )
                 return str(data)
 
 
@@ -1133,7 +1151,9 @@ class AlterClient(BaseAIClient):
                     _LOGGER.debug("Full Alter response: %s", json.dumps(data, indent=2))
                     return str(data)
                 if choices and "message" in choices[0]:
-                    return self.strip_thinking_tags(choices[0]["message"].get("content", str(data)))
+                    return self.strip_thinking_tags(
+                        choices[0]["message"].get("content", str(data))
+                    )
                 return str(data)
 
 
@@ -1188,7 +1208,9 @@ class ZaiClient(BaseAIClient):
                     _LOGGER.debug("Full z.ai response: %s", json.dumps(data, indent=2))
                     return str(data)
                 if choices and "message" in choices[0]:
-                    return self.strip_thinking_tags(choices[0]["message"].get("content", str(data)))
+                    return self.strip_thinking_tags(
+                        choices[0]["message"].get("content", str(data))
+                    )
                 return str(data)
 
 
@@ -1223,7 +1245,14 @@ class AskSageClient(BaseAIClient):
 
     # live: 0=off, 1=Live (Google), 2=Live+ (Google+crawl)
     # deep_agent: True to route through Ask Sage's Deep Agent (/execute-agent)
-    def __init__(self, token: str, model: str = "gpt-4o-mini", live: int = 0, deep_agent: bool = False, hass=None):
+    def __init__(
+        self,
+        token: str,
+        model: str = "gpt-4o-mini",
+        live: int = 0,
+        deep_agent: bool = False,
+        hass=None,
+    ):
         super().__init__(hass=hass)
         self.token = token
         self.model = model
@@ -1236,9 +1265,7 @@ class AskSageClient(BaseAIClient):
         return [
             m["id"]
             for m in raw
-            if isinstance(m, dict)
-            and "id" in m
-            and "gov" not in m["id"].lower()
+            if isinstance(m, dict) and "id" in m and "gov" not in m["id"].lower()
         ]
 
     @classmethod
@@ -1402,7 +1429,7 @@ class AskSageClient(BaseAIClient):
             "message": message_payload,
             "model": self.model,
             "temperature": 0,
-            "dataset": "none",      # Disable Ask Sage RAG; HA data is injected by the agent
+            "dataset": "none",  # Disable Ask Sage RAG; HA data is injected by the agent
             "limit_references": 0,  # Belt-and-suspenders: zero RAG references regardless of dataset setting
             "live": self.live,
         }
@@ -1438,14 +1465,19 @@ class AskSageClient(BaseAIClient):
                     timeout=aiohttp.ClientTimeout(total=300),
                 ) as resp:
                     if resp.status == 401:
-                        raise Exception("Ask Sage API error 401: invalid or expired token")
+                        raise Exception(
+                            "Ask Sage API error 401: invalid or expired token"
+                        )
                     if resp.status in (429, 503):
                         error_text = await resp.text()
                         if attempt < _ASK_SAGE_MAX_RETRIES - 1:
                             delay = _ASK_SAGE_RETRY_DELAYS[attempt]
                             _LOGGER.warning(
                                 "Ask Sage HTTP %d (attempt %d/%d), retrying in %ds",
-                                resp.status, attempt + 1, _ASK_SAGE_MAX_RETRIES, delay,
+                                resp.status,
+                                attempt + 1,
+                                _ASK_SAGE_MAX_RETRIES,
+                                delay,
                             )
                             await asyncio.sleep(delay)
                             continue
@@ -1457,12 +1489,12 @@ class AskSageClient(BaseAIClient):
                         _LOGGER.error(
                             "Ask Sage API error %d: %s", resp.status, error_text
                         )
-                        raise Exception(f"Ask Sage API error {resp.status}: {error_text[:200]}")
+                        raise Exception(
+                            f"Ask Sage API error {resp.status}: {error_text[:200]}"
+                        )
 
                     data = await resp.json()
-                    _LOGGER.debug(
-                        "Ask Sage raw response keys: %s", list(data.keys())
-                    )
+                    _LOGGER.debug("Ask Sage raw response keys: %s", list(data.keys()))
 
                     if self.deep_agent:
                         # Deep Agent response: {execution_status, response: {response: "..."}, ...}
@@ -1495,19 +1527,25 @@ class AskSageClient(BaseAIClient):
                 delay = _ASK_SAGE_RETRY_DELAYS[attempt]
                 _LOGGER.warning(
                     "Ask Sage overload response (attempt %d/%d), retrying in %ds: %s",
-                    attempt + 1, _ASK_SAGE_MAX_RETRIES, delay, text[:100],
+                    attempt + 1,
+                    _ASK_SAGE_MAX_RETRIES,
+                    delay,
+                    text[:100],
                 )
                 await asyncio.sleep(delay)
         else:
             # All retries exhausted — return friendly message
             _LOGGER.error(
                 "Ask Sage overload after %d attempts. Last response: %s",
-                _ASK_SAGE_MAX_RETRIES, last_text[:200],
+                _ASK_SAGE_MAX_RETRIES,
+                last_text[:200],
             )
-            return json.dumps({
-                "request_type": "final_response",
-                "response": "Ask Sage is temporarily overloaded. It was automatically retried 3 times — if you still see this, please resend your message.",
-            })
+            return json.dumps(
+                {
+                    "request_type": "final_response",
+                    "response": "Ask Sage is temporarily overloaded. It was automatically retried 3 times — if you still see this, please resend your message.",
+                }
+            )
 
         return self.strip_thinking_tags(str(text))
 
@@ -1574,7 +1612,9 @@ class AskSageClient(BaseAIClient):
                     timeout=aiohttp.ClientTimeout(total=300),
                 ) as resp:
                     if resp.status != 200:
-                        _LOGGER.warning("Ask Sage stream error %d, falling back", resp.status)
+                        _LOGGER.warning(
+                            "Ask Sage stream error %d, falling back", resp.status
+                        )
                         result = await self.get_response(messages, **kwargs)
                         yield result
                         return
@@ -1590,7 +1630,9 @@ class AskSageClient(BaseAIClient):
                             try:
                                 chunk = json.loads(data_str)
                                 # Ask Sage streaming may return tokens in 'message' or 'delta'
-                                text = chunk.get("message", "") or chunk.get("delta", "")
+                                text = chunk.get("message", "") or chunk.get(
+                                    "delta", ""
+                                )
                                 if text:
                                     yield text
                             except json.JSONDecodeError:
@@ -1880,23 +1922,35 @@ class AiAgentHaAgent:
         if provider == "openai":
             model = models_config.get("openai", "gpt-3.5-turbo")
             base_url = config.get("openai_base_url", "") or ""
-            self.ai_client = OpenAIClient(config.get("openai_token"), model, base_url, hass=self.hass)
+            self.ai_client = OpenAIClient(
+                config.get("openai_token"), model, base_url, hass=self.hass
+            )
         elif provider == "gemini":
             model = models_config.get("gemini", "gemini-2.5-flash")
-            self.ai_client = GeminiClient(config.get("gemini_token"), model, hass=self.hass)
+            self.ai_client = GeminiClient(
+                config.get("gemini_token"), model, hass=self.hass
+            )
         elif provider == "openrouter":
             model = models_config.get("openrouter", "openai/gpt-4o")
-            self.ai_client = OpenRouterClient(config.get("openrouter_token"), model, hass=self.hass)
+            self.ai_client = OpenRouterClient(
+                config.get("openrouter_token"), model, hass=self.hass
+            )
         elif provider == "anthropic":
             model = models_config.get("anthropic", "claude-opus-4-6")
-            self.ai_client = AnthropicClient(config.get("anthropic_token"), model, hass=self.hass)
+            self.ai_client = AnthropicClient(
+                config.get("anthropic_token"), model, hass=self.hass
+            )
         elif provider == "alter":
             model = models_config.get("alter", "")
-            self.ai_client = AlterClient(config.get("alter_token"), model, hass=self.hass)
+            self.ai_client = AlterClient(
+                config.get("alter_token"), model, hass=self.hass
+            )
         elif provider == "zai":
             model = models_config.get("zai", "glm-4.7")
             endpoint_type = config.get("zai_endpoint", "general")
-            self.ai_client = ZaiClient(config.get("zai_token"), model, endpoint_type, hass=self.hass)
+            self.ai_client = ZaiClient(
+                config.get("zai_token"), model, endpoint_type, hass=self.hass
+            )
         elif provider == "asksage":
             model = models_config.get("asksage", "gpt-4o-mini")
             self.ai_client = AskSageClient(
@@ -1909,10 +1963,14 @@ class AiAgentHaAgent:
             # Schedule data-scope validation as a background task so it runs
             # after HA finishes initializing without blocking the setup path.
             if self.hass:
+
                 async def _run_asksage_validation(client=self.ai_client):
                     result = await client.validate_data_scope()
                     if not result["valid"]:
-                        _LOGGER.warning("Ask Sage data-scope validation: %s", result["message"])
+                        _LOGGER.warning(
+                            "Ask Sage data-scope validation: %s", result["message"]
+                        )
+
                 self.hass.async_create_task(_run_asksage_validation())
         elif provider == "local":
             model = models_config.get("local", "")
@@ -1923,7 +1981,9 @@ class AiAgentHaAgent:
             self.ai_client = LocalClient(url, model, hass=self.hass)
         else:  # default to llama if somehow specified
             model = models_config.get("llama", "Llama-4-Maverick-17B-128E-Instruct-FP8")
-            self.ai_client = LlamaClient(config.get("llama_token"), model, hass=self.hass)
+            self.ai_client = LlamaClient(
+                config.get("llama_token"), model, hass=self.hass
+            )
 
         _LOGGER.debug(
             "AiAgentHaAgent initialized successfully with provider: %s, model: %s",
@@ -3297,7 +3357,7 @@ Then restart Home Assistant to see your new dashboard in the sidebar."""
     ) -> Dict[str, Any]:
         """Process a user query with input validation and rate limiting."""
         async with self._query_lock:
-          return await self._process_query_inner(user_query, provider, debug)
+            return await self._process_query_inner(user_query, provider, debug)
 
     async def _process_query_inner(
         self, user_query: str, provider: Optional[str] = None, debug: bool = False
@@ -3347,9 +3407,7 @@ Then restart Home Assistant to see your new dashboard in the sidebar."""
                 },
                 "anthropic": {
                     "token_key": "anthropic_token",
-                    "model": models_config.get(
-                        "anthropic", "claude-opus-4-6"
-                    ),
+                    "model": models_config.get("anthropic", "claude-opus-4-6"),
                     "client_class": AnthropicClient,
                 },
                 "alter": {
@@ -3441,23 +3499,33 @@ Then restart Home Assistant to see your new dashboard in the sidebar."""
                         scope_result = await self.ai_client.validate_data_scope()
                         if not scope_result["valid"]:
                             _LOGGER.warning(
-                                "Ask Sage data-scope validation failed: %s", scope_result["message"]
+                                "Ask Sage data-scope validation failed: %s",
+                                scope_result["message"],
                             )
                         else:
-                            _LOGGER.debug("Ask Sage data-scope: %s", scope_result["message"])
+                            _LOGGER.debug(
+                                "Ask Sage data-scope: %s", scope_result["message"]
+                            )
                     except Exception as _scope_exc:  # noqa: BLE001
-                        _LOGGER.warning("Ask Sage data-scope check error: %s", _scope_exc)
+                        _LOGGER.warning(
+                            "Ask Sage data-scope check error: %s", _scope_exc
+                        )
                 else:
                     # Other clients take (token, model)
                     # For OpenAI, also pass optional custom base_url override
                     if selected_provider == "openai":
                         base_url = config.get("openai_base_url", "") or ""
                         self.ai_client = provider_settings["client_class"](
-                            token=token, model=provider_settings["model"], base_url=base_url, hass=self.hass
+                            token=token,
+                            model=provider_settings["model"],
+                            base_url=base_url,
+                            hass=self.hass,
                         )
                     else:
                         self.ai_client = provider_settings["client_class"](
-                            token=token, model=provider_settings["model"], hass=self.hass
+                            token=token,
+                            model=provider_settings["model"],
+                            hass=self.hass,
                         )
                     _LOGGER.debug(
                         f"Initialized {selected_provider} client with model {provider_settings['model']}"
@@ -3501,7 +3569,10 @@ Then restart Home Assistant to see your new dashboard in the sidebar."""
             # preventing a failed query from poisoning the next call.
             history_rollback_index = len(self.conversation_history)
             self.conversation_history.append({"role": "user", "content": user_query})
-            _LOGGER.debug("Added user query to conversation history (rollback index=%d)", history_rollback_index)
+            _LOGGER.debug(
+                "Added user query to conversation history (rollback index=%d)",
+                history_rollback_index,
+            )
 
             max_iterations = 5  # Prevent infinite loops
             iteration = 0
@@ -3516,7 +3587,9 @@ Then restart Home Assistant to see your new dashboard in the sidebar."""
                     streaming_enabled = config.get("enable_streaming", False)
                     t_start = time.monotonic()
 
-                    if streaming_enabled and hasattr(self.ai_client, 'get_response_stream'):
+                    if streaming_enabled and hasattr(
+                        self.ai_client, "get_response_stream"
+                    ):
                         response = await self._get_ai_response_stream()
                     else:
                         response = await self._get_ai_response()
@@ -3525,7 +3598,9 @@ Then restart Home Assistant to see your new dashboard in the sidebar."""
                     thinking_duration = round(t_end - t_start, 1)
 
                     # Extract thinking content BEFORE stripping
-                    thinking_content = BaseAIClient.extract_thinking(response) if response else None
+                    thinking_content = (
+                        BaseAIClient.extract_thinking(response) if response else None
+                    )
 
                     # Strip thinking tags from the response for further processing
                     if response:
@@ -4187,7 +4262,9 @@ Then restart Home Assistant to see your new dashboard in the sidebar."""
                                 }
                             )
                             # Roll back history and do not cache — let the user retry fresh.
-                            self.conversation_history = self.conversation_history[:history_rollback_index]
+                            self.conversation_history = self.conversation_history[
+                                :history_rollback_index
+                            ]
                             return result
 
                         # If response is not valid JSON, try to wrap it as a final response
@@ -4232,15 +4309,22 @@ Then restart Home Assistant to see your new dashboard in the sidebar."""
                             self._trim_history()
                             self._set_cached_data(cache_key, result)
                         else:
-                            self.conversation_history = self.conversation_history[:history_rollback_index]
+                            self.conversation_history = self.conversation_history[
+                                :history_rollback_index
+                            ]
                         return result
 
                 except Exception as e:
                     _LOGGER.exception("Error processing AI response: %s", str(e))
                     # Roll back conversation history to before this query so the
                     # failed prompt doesn't contaminate the next call.
-                    self.conversation_history = self.conversation_history[:history_rollback_index]
-                    _LOGGER.debug("Rolled back conversation history to index %d after error", history_rollback_index)
+                    self.conversation_history = self.conversation_history[
+                        :history_rollback_index
+                    ]
+                    _LOGGER.debug(
+                        "Rolled back conversation history to index %d after error",
+                        history_rollback_index,
+                    )
                     # Do NOT cache error results — let the next identical query retry fresh.
                     return _with_debug(
                         {
@@ -4252,8 +4336,13 @@ Then restart Home Assistant to see your new dashboard in the sidebar."""
             # If we've reached max iterations without a final response
             _LOGGER.warning("Reached maximum iterations without final response")
             # Roll back history — the query loop ran but never settled on a final response.
-            self.conversation_history = self.conversation_history[:history_rollback_index]
-            _LOGGER.debug("Rolled back conversation history to index %d after max iterations", history_rollback_index)
+            self.conversation_history = self.conversation_history[
+                :history_rollback_index
+            ]
+            _LOGGER.debug(
+                "Rolled back conversation history to index %d after max iterations",
+                history_rollback_index,
+            )
             result = {
                 "success": False,
                 "error": "Maximum iterations reached without final response",
@@ -4266,8 +4355,13 @@ Then restart Home Assistant to see your new dashboard in the sidebar."""
             _LOGGER.exception("Error in process_query: %s", str(e))
             # Roll back if history_rollback_index was set before the exception.
             try:
-                self.conversation_history = self.conversation_history[:history_rollback_index]
-                _LOGGER.debug("Rolled back conversation history to index %d after outer exception", history_rollback_index)
+                self.conversation_history = self.conversation_history[
+                    :history_rollback_index
+                ]
+                _LOGGER.debug(
+                    "Rolled back conversation history to index %d after outer exception",
+                    history_rollback_index,
+                )
             except NameError:
                 pass  # Exception occurred before history_rollback_index was set
             return _with_debug(
@@ -4382,10 +4476,14 @@ Then restart Home Assistant to see your new dashboard in the sidebar."""
         if not recent_messages or recent_messages[0].get("role") != "system":
             recent_messages = [self.system_prompt] + recent_messages
 
-        _LOGGER.debug("Streaming: sending %d messages to AI provider", len(recent_messages))
+        _LOGGER.debug(
+            "Streaming: sending %d messages to AI provider", len(recent_messages)
+        )
 
-        if not hasattr(self.ai_client, 'get_response_stream'):
-            _LOGGER.debug("Provider does not support streaming, falling back to non-streaming")
+        if not hasattr(self.ai_client, "get_response_stream"):
+            _LOGGER.debug(
+                "Provider does not support streaming, falling back to non-streaming"
+            )
             return await self._get_ai_response()
 
         accumulated = []
@@ -4395,10 +4493,13 @@ Then restart Home Assistant to see your new dashboard in the sidebar."""
                 # Fire WebSocket event for each chunk
                 try:
                     partial_text = "".join(accumulated)
-                    self.hass.bus.async_fire("ai_agent_ha/stream_chunk", {
-                        "type": "stream_chunk",
-                        "text": partial_text,
-                    })
+                    self.hass.bus.async_fire(
+                        "ai_agent_ha/stream_chunk",
+                        {
+                            "type": "stream_chunk",
+                            "text": partial_text,
+                        },
+                    )
                 except Exception:
                     pass  # Don't fail the stream for WS errors
 
@@ -4410,9 +4511,12 @@ Then restart Home Assistant to see your new dashboard in the sidebar."""
 
             # Fire stream end event
             try:
-                self.hass.bus.async_fire("ai_agent_ha/stream_end", {
-                    "type": "stream_end",
-                })
+                self.hass.bus.async_fire(
+                    "ai_agent_ha/stream_end",
+                    {
+                        "type": "stream_end",
+                    },
+                )
             except Exception:
                 pass
 
@@ -4430,10 +4534,9 @@ Then restart Home Assistant to see your new dashboard in the sidebar."""
         if len(self.conversation_history) > self._max_history_len:
             # Keep the system prompt (index 0) + the tail
             tail_size = self._max_history_len - 1
-            self.conversation_history = (
-                [self.conversation_history[0]]
-                + self.conversation_history[-tail_size:]
-            )
+            self.conversation_history = [
+                self.conversation_history[0]
+            ] + self.conversation_history[-tail_size:]
             _LOGGER.debug(
                 "Trimmed conversation history to %d entries",
                 len(self.conversation_history),
