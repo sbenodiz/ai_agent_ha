@@ -8,6 +8,7 @@ import voluptuous as vol
 from homeassistant.components.frontend import async_register_built_in_panel
 from homeassistant.components.http import StaticPathConfig
 from homeassistant.config_entries import ConfigEntry
+from homeassistant.components import websocket_api
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ConfigEntryNotReady
 from homeassistant.helpers import config_validation as cv
@@ -323,6 +324,45 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         except Exception as e:
             _LOGGER.error(f"Error updating dashboard: {e}")
             return {"error": str(e)}
+
+
+    @websocket_api.websocket_command({vol.Required("type"): "ai_agent_ha/get_providers"})
+    @websocket_api.async_response
+    async def ws_get_providers(hass, connection, msg):
+        """Return safe provider info from hass.data — no credentials exposed."""
+        from .const import AI_PROVIDERS as _AI_PROVIDERS
+        domain_data = hass.data.get(DOMAIN, {})
+        agents = domain_data.get("agents", {})
+        configs = domain_data.get("configs", {})
+
+        provider_display = {
+            "openai": "OpenAI",
+            "llama": "Llama",
+            "gemini": "Google Gemini",
+            "openrouter": "OpenRouter",
+            "anthropic": "Anthropic",
+            "alter": "Alter",
+            "zai": "z.ai",
+            "local": "Local Model",
+            "asksage": "Ask Sage",
+        }
+
+        providers = []
+        for provider_key, agent in agents.items():
+            cfg = configs.get(provider_key, {})
+            models = cfg.get("models", {})
+            model_name = models.get(provider_key, "")
+            providers.append({
+                "value": provider_key,
+                "label": provider_display.get(provider_key, provider_key),
+                "model": model_name,
+                "persist_chat_history": cfg.get("persist_chat_history", False),
+                "enable_streaming": cfg.get("enable_streaming", False),
+            })
+
+        connection.send_message(websocket_api.result_message(msg["id"], providers))
+
+    hass.components.websocket_api.async_register_command(ws_get_providers)
 
     # Register services
     hass.services.async_register(DOMAIN, "query", async_handle_query)
