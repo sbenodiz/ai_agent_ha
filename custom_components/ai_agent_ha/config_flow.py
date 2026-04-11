@@ -195,7 +195,7 @@ class AiAgentHaConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):  # type: ig
     """Handle a config flow for AI Agent HA."""
 
     VERSION = 1
-    CONNECTION_CLASS = config_entries.CONN_CLASS_CLOUD_POLL
+    MINOR_VERSION = 1
 
     @staticmethod
     @callback
