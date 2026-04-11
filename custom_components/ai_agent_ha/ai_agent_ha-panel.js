@@ -58,6 +58,22 @@ function extractTemperatureChart(allObjects) {
   return null;
 }
 
+// Extract a JSON object from text that may contain markdown fences, prose, or YAML.
+// Tries: strip code fences → direct parse → find first { → nested { scan.
+function extractJSONFromText(text) {
+  if (!text || typeof text !== 'string') return null;
+  // Strip markdown code fences
+  const fenceMatch = text.match(/```(?:json|yaml)?\s*([\s\S]*?)```/);
+  if (fenceMatch) text = fenceMatch[1].trim();
+  // Try direct parse
+  try { return JSON.parse(text); } catch(e) { /* continue */ }
+  // Find first { and try parsing from each one
+  for (let i = text.indexOf('{'); i !== -1 && i < text.length; i = text.indexOf('{', i + 1)) {
+    try { return JSON.parse(text.slice(i)); } catch(e) { /* continue */ }
+  }
+  return null;
+}
+
 // Legacy key (pre-v1.1.0) — cleared on first opt-in load
 const CHAT_STORAGE_KEY = 'ai_agent_ha_chat_history';
 
@@ -1719,17 +1735,28 @@ class AiAgentHaPanel extends LitElement {
         message.text = 'I created a dashboard for you. Review it below.';
       }
 
-      // YAML bleed guard: if text starts with YAML dashboard keys, treat as dashboard response
+      // YAML / markdown bleed guard: if text looks like it contains a dashboard
+      // response wrapped in prose, code fences, or YAML, try to extract it.
       if (!message.dashboard && message.text) {
         const trimmed = message.text.trim();
-        if (/^(dashboard:|title:|views:)/m.test(trimmed)) {
-          try {
-            // Attempt to parse the YAML text — it may be a dashboard the LLM
-            // returned as YAML instead of JSON.  The Python side should have
-            // caught this, but guard the frontend too.
+        const looksLikeDashboard = /^(dashboard:|title:|views:)/m.test(trimmed)
+          || /```(?:json|yaml)?\s*[\s\S]*?(dashboard|views|cards)/i.test(trimmed);
+        if (looksLikeDashboard) {
+          const recovered = extractJSONFromText(trimmed);
+          if (recovered && typeof recovered === 'object') {
+            // Unwrap top-level "dashboard" key if present
+            const dash = recovered.dashboard || recovered;
+            if (dash.views || dash.cards || dash.title) {
+              console.warn('Recovered dashboard from YAML/markdown bleed in message text');
+              message.dashboard = dash;
+              message.text = recovered.message || 'I created a dashboard for you. Review it below.';
+            }
+          }
+          // If extraction failed, still suppress the raw YAML/markdown
+          if (!message.dashboard) {
             console.warn('Detected YAML dashboard bleed in message text — suppressing raw display');
             message.text = 'The AI returned a dashboard in an unexpected format. Please try your request again.';
-          } catch (_) { /* ignore */ }
+          }
         }
       }
 
@@ -1913,32 +1940,37 @@ class AiAgentHaPanel extends LitElement {
     if (this._isLoading) return;
     this._isLoading = true;
     try {
-      // 5th argument `true` enables return_response (HA 2023.4+)
-      const result = await this.hass.callService('ai_agent_ha', 'create_dashboard', {
-        dashboard_config: dashboard
-      }, {}, true);
-
-      console.debug("Dashboard creation result:", result);
-
-      // Check for service response with success/error
-      const response = result?.response || result;
-      if (response && response.error) {
-        this._messages = [...this._messages, {
-          type: 'assistant',
-          text: `Error: ${response.error}`
-        }];
-      } else if (response && response.message) {
-        this._messages = [...this._messages, {
-          type: 'assistant',
-          text: response.message
-        }];
-      } else {
-        // Fallback success message
-        this._messages = [...this._messages, {
-          type: 'assistant',
-          text: `Dashboard "${dashboard.title}" has been created successfully!`
-        }];
+      const title = dashboard.title || 'My Dashboard';
+      // Generate url_path from title — must contain a hyphen for HA validation
+      let urlPath = title.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
+      if (!urlPath.includes('-')) {
+        urlPath = urlPath + '-dashboard';
       }
+
+      // Step 1: Create the dashboard entry via WebSocket
+      console.debug("Creating dashboard entry via WS:", urlPath);
+      await this.hass.callWS({
+        type: 'lovelace/dashboards/create',
+        url_path: urlPath,
+        title: title,
+        icon: dashboard.icon || 'mdi:view-dashboard',
+        show_in_sidebar: true,
+        require_admin: false,
+        mode: 'storage',
+      });
+
+      // Step 2: Save the views/cards config to the new dashboard
+      console.debug("Saving dashboard config via WS:", urlPath);
+      await this.hass.callWS({
+        type: 'lovelace/config/save',
+        url_path: urlPath,
+        config: { views: dashboard.views || [] },
+      });
+
+      this._messages = [...this._messages, {
+        type: 'assistant',
+        text: `Dashboard "${title}" created successfully!\n\nThe dashboard is now available in your sidebar — no restart required.\nURL: /lovelace-${urlPath}`
+      }];
     } catch (error) {
       console.error("Error creating dashboard:", error);
       this._error = error.message || 'An error occurred while creating the dashboard';
@@ -1964,7 +1996,7 @@ class AiAgentHaPanel extends LitElement {
     this.requestUpdate();
     try {
       // Fetch existing dashboards via Lovelace WebSocket API
-      const dashboards = await this.hass.callWS({ type: 'lovelace/dashboards' });
+      const dashboards = await this.hass.callWS({ type: 'lovelace/dashboards/list' });
       // Filter to user-created dashboards (exclude system ones without url_path)
       this._existingDashboards = (dashboards || []).filter(d => d.url_path);
       if (this._existingDashboards.length === 0) {
@@ -1979,10 +2011,20 @@ class AiAgentHaPanel extends LitElement {
       this._dashboardPickerActive = true;
     } catch (error) {
       console.error('Error fetching dashboards:', error);
-      this._messages = [...this._messages, {
-        type: 'assistant',
-        text: `Could not load existing dashboards: ${error.message || error}. Please try creating a new dashboard instead.`
-      }];
+      const errMsg = (error.message || String(error)).toLowerCase();
+      if (errMsg.includes('unknown command') || errMsg.includes('unknown_command')) {
+        // HA is likely in YAML mode — fall back to creating a new dashboard
+        this._messages = [...this._messages, {
+          type: 'assistant',
+          text: 'Dashboard listing not available (YAML mode). Creating a new dashboard instead.'
+        }];
+        await this._approveDashboard(dashboard);
+      } else {
+        this._messages = [...this._messages, {
+          type: 'assistant',
+          text: `Could not load existing dashboards: ${error.message || error}. Please try creating a new dashboard instead.`
+        }];
+      }
     } finally {
       this._dashboardPickerLoading = false;
       this.requestUpdate();
