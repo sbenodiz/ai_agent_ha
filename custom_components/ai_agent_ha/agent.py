@@ -1050,12 +1050,17 @@ class AskSageClient(BaseAIClient):
     """
 
     QUERY_URL = "https://api.asksage.ai/server/query"
+    AGENT_URL = "https://api.asksage.ai/server/execute-agent"
     MODELS_URL = "https://api.asksage.ai/server/get-models"
 
-    def __init__(self, token: str, model: str = "gpt-4o-mini", hass=None):
+    # live: 0=off, 1=Live (Google), 2=Live+ (Google+crawl)
+    # deep_agent: True to route through Ask Sage's Deep Agent (/execute-agent)
+    def __init__(self, token: str, model: str = "gpt-4o-mini", live: int = 0, deep_agent: bool = False, hass=None):
         super().__init__(hass=hass)
         self.token = token
         self.model = model
+        self.live = int(live)  # coerce str->int in case HA stores it as string
+        self.deep_agent = bool(deep_agent)
 
     @staticmethod
     def _filter_models(raw: list) -> list:
@@ -1093,18 +1098,23 @@ class AskSageClient(BaseAIClient):
     async def get_response(self, messages, **kwargs) -> str:
         """Send a query to Ask Sage and return the generated text.
 
+        Routes to /execute-agent when deep_agent=True, otherwise /query.
+
         The Ask Sage /query endpoint accepts:
           - message: the prompt (string or conversation array)
           - model: model id string
-          - temperature: float 0–1
-          - dataset: "none" (we don’t inject HA knowledge into Ask Sage’s RAG)
+          - temperature: float 0-1
+          - dataset: "none" (we don't inject HA knowledge into Ask Sage's RAG)
+          - live: 0=off, 1=Live (Google), 2=Live+ (Google+crawl)
 
         The response shape is CompletionResponse; the generated text lives in
         the ``message`` field (not ``choices`` like OpenAI-compatible APIs).
         """
         _LOGGER.debug(
-            "Ask Sage: sending query with model=%s, %d messages",
+            "Ask Sage: sending query with model=%s, live=%d, deep_agent=%s, %d messages",
             self.model,
+            self.live,
+            self.deep_agent,
             len(messages),
         )
 
@@ -1146,7 +1156,7 @@ class AskSageClient(BaseAIClient):
             "model": self.model,
             "temperature": 0,
             "dataset": "none",   # Disable Ask Sage RAG; HA data is injected by the agent
-            "live": 0,
+            "live": self.live,
         }
 
         _LOGGER.debug(
@@ -1154,9 +1164,21 @@ class AskSageClient(BaseAIClient):
             str(message_payload)[:200],
         )
 
+        # Deep Agent mode routes to /execute-agent; standard queries use /query
+        endpoint_url = self.AGENT_URL if self.deep_agent else self.QUERY_URL
+        if self.deep_agent:
+            # /execute-agent wraps the message in an agent payload
+            payload = {
+                "message": message_payload,
+                "model": self.model,
+                "live": self.live,
+                "streaming": False,
+            }
+            _LOGGER.debug("Ask Sage: routing to Deep Agent endpoint")
+
         async with self._session() as session:
             async with session.post(
-                self.QUERY_URL,
+                endpoint_url,
                 headers=headers,
                 json=payload,
                 timeout=aiohttp.ClientTimeout(total=300),
@@ -1175,11 +1197,21 @@ class AskSageClient(BaseAIClient):
                     "Ask Sage raw response keys: %s", list(data.keys())
                 )
 
-                # CompletionResponse schema: generated text is in `message`.
-                text = data.get("message", "")
-                if not text:
-                    # Fallback: some error states surface in `response`
-                    text = data.get("response", "")
+                if self.deep_agent:
+                    # Deep Agent response: {execution_status, response: {response: "..."}, ...}
+                    inner = data.get("response", {})
+                    if isinstance(inner, dict):
+                        text = inner.get("response", "") or inner.get("message", "")
+                    else:
+                        text = str(inner)
+                    if not text:
+                        text = data.get("message", "")
+                else:
+                    # Standard /query CompletionResponse: generated text is in `message`.
+                    text = data.get("message", "")
+                    if not text:
+                        # Fallback: some error states surface in `response`
+                        text = data.get("response", "")
                 if not text:
                     _LOGGER.warning(
                         "Ask Sage returned empty message. Full response: %s",
@@ -1483,7 +1515,13 @@ class AiAgentHaAgent:
             self.ai_client = ZaiClient(config.get("zai_token"), model, endpoint_type, hass=self.hass)
         elif provider == "asksage":
             model = models_config.get("asksage", "gpt-4o-mini")
-            self.ai_client = AskSageClient(config.get("asksage_token"), model, hass=self.hass)
+            self.ai_client = AskSageClient(
+                config.get("asksage_token"),
+                model,
+                live=config.get("asksage_live", 0),
+                deep_agent=config.get("asksage_deep_agent", False),
+                hass=self.hass,
+            )
         elif provider == "local":
             model = models_config.get("local", "")
             url = config.get("local_url")
@@ -2991,6 +3029,19 @@ Then restart Home Assistant to see your new dashboard in the sidebar."""
                     )
                     _LOGGER.debug(
                         f"Initialized {selected_provider} client with model {provider_settings['model']}"
+                    )
+                elif selected_provider == "asksage":
+                    # AskSageClient takes (token, model, live, deep_agent)
+                    self.ai_client = provider_settings["client_class"](
+                        token=token,
+                        model=provider_settings["model"],
+                        live=config.get("asksage_live", 0),
+                        deep_agent=config.get("asksage_deep_agent", False),
+                        hass=self.hass,
+                    )
+                    _LOGGER.debug(
+                        f"Initialized {selected_provider} client with model {provider_settings['model']}, "
+                        f"live={config.get('asksage_live', 0)}, deep_agent={config.get('asksage_deep_agent', False)}"
                     )
                 else:
                     # Other clients take (token, model)
