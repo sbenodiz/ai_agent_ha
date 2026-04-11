@@ -35,6 +35,9 @@ AI_PROVIDERS = [
 # Chat persistence
 CONF_PERSIST_CHAT_HISTORY = "persist_chat_history"
 
+# SSE Streaming
+CONF_ENABLE_STREAMING = "enable_streaming"
+
 # AI Provider constants
 CONF_MODELS = "models"
 
