@@ -161,7 +161,8 @@ class AiAgentHaPanel extends LitElement {
       _dashboardChangeActive: { type: Object, reflect: false, attribute: false },
       _dashboardChangeText: { type: String, reflect: false, attribute: false },
       _subscriptionsReady: { type: Boolean, reflect: false, attribute: false },
-      _streamingEnabled: { type: Boolean, reflect: false, attribute: false }
+      _streamingEnabled: { type: Boolean, reflect: false, attribute: false },
+      _lastProcessedAnswer: { type: String, reflect: false, attribute: false }
     };
   }
 
@@ -901,6 +902,7 @@ class AiAgentHaPanel extends LitElement {
     this._subscriptionsReady = false;
     this._streamingEnabled = false;
     this._responseUnsub = null;
+    this._lastProcessedAnswer = '';
     console.debug("AI Agent HA Panel constructor called");
   }
 
@@ -1656,12 +1658,23 @@ class AiAgentHaPanel extends LitElement {
     }, timeoutMs);
 
     try {
-      console.debug("Calling ai_agent_ha service");
-      await this.hass.callService('ai_agent_ha', 'query', {
-        prompt: prompt,
-        provider: this._selectedProvider,
-        debug: this._showThinking
-      });
+      console.debug("Calling ai_agent_ha service with return_response");
+      const result = await this.hass.callService(
+        'ai_agent_ha', 'query',
+        {
+          prompt: prompt,
+          provider: this._selectedProvider,
+          debug: this._showThinking
+        },
+        {},    // target
+        true   // return_response
+      );
+
+      // Process the result directly — eliminates event bus race condition
+      if (result) {
+        console.debug("Got direct service response:", result);
+        this._processQueryResult({data: result});
+      }
     } catch (error) {
       console.error("Error calling service:", error);
       this._clearLoadingState();
@@ -1698,8 +1711,20 @@ class AiAgentHaPanel extends LitElement {
   }
 
   _handleLlamaResponse(event) {
-    console.debug("Received llama response:", event);
-    
+    this._processQueryResult(event);
+  }
+
+  _processQueryResult(event) {
+    // Dedup: prevent double-processing from both direct response and event bus
+    const answer = event.data?.answer || '';
+    if (this._lastProcessedAnswer === answer && answer) {
+      console.debug('Skipping duplicate response');
+      return;
+    }
+    this._lastProcessedAnswer = answer;
+
+    console.debug("Processing query result:", event);
+
     try {
       this._clearLoadingState();
       this._isStreaming = false;
@@ -1801,7 +1826,7 @@ class AiAgentHaPanel extends LitElement {
       ];
     }
     } catch (error) {
-      console.error("Error in _handleLlamaResponse:", error);
+      console.error("Error in _processQueryResult:", error);
       this._clearLoadingState();
       this._error = 'An error occurred while processing the response';
       this._messages = [...this._messages, {
