@@ -1204,13 +1204,15 @@ class AskSageClient(BaseAIClient):
         # (single turn) or an array of {user, message} objects (multi-turn).
         # We normalise from the OpenAI-style {role, content} format that
         # conversation_history uses throughout this integration.
+        system_content = ""
         asksage_messages = []
         for msg in messages:
             role = msg.get("role", "")
             content = msg.get("content", "")
             if role == "system":
-                # Ask Sage handles the system prompt via the persona/system_prompt
-                # field — skip it from the message array to avoid duplication.
+                # Ask Sage handles the system prompt via the system_prompt
+                # field — capture it and skip from the message array.
+                system_content = content
                 continue
             elif role in ("user", "me"):
                 asksage_messages.append({"user": "me", "message": content})
@@ -1236,6 +1238,8 @@ class AskSageClient(BaseAIClient):
             "limit_references": 0,  # Belt-and-suspenders: zero RAG references regardless of dataset setting
             "live": self.live,
         }
+        if system_content:
+            payload["system_prompt"] = system_content
 
         _LOGGER.debug(
             "Ask Sage request payload (message preview): %s",
@@ -1252,6 +1256,8 @@ class AskSageClient(BaseAIClient):
                 "live": self.live,
                 "streaming": False,
             }
+            if system_content:
+                payload["system_prompt"] = system_content
             _LOGGER.debug("Ask Sage: routing to Deep Agent endpoint")
 
         async with self._session() as session:
