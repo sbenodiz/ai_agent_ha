@@ -161,6 +161,23 @@ class BaseAIClient:
         raise NotImplementedError
 
     @staticmethod
+    def extract_thinking(text: str):
+        """Extract thinking content from model response before stripping.
+
+        Returns (thinking_content, None) — thinking_content is None if no block found.
+        """
+        if not text:
+            return None
+        match = re.search(r'<think>(.*?)</think>', text, re.DOTALL | re.IGNORECASE)
+        if match:
+            return match.group(1).strip()
+        # Also check <|thinking|> variant
+        match = re.search(r'<\|thinking\|>(.*?)</\|thinking\|>', text, re.DOTALL | re.IGNORECASE)
+        if match:
+            return match.group(1).strip()
+        return None
+
+    @staticmethod
     def strip_thinking_tags(text: str) -> str:
         """Remove thinking/reasoning blocks from model responses.
 
@@ -553,6 +570,67 @@ class LocalClient(BaseAIClient):
                     raise Exception(f"Failed to parse local API response: {str(e)}")
 
 
+    async def get_response_stream(self, messages, **kwargs):
+        """SSE streaming for OpenAI-compatible local endpoints.
+
+        Yields text chunks as they arrive. Falls back to non-streaming on error.
+        Only works for OpenAI-compatible endpoints (LM Studio, vLLM, etc.).
+        """
+        if not self._is_openai_compatible:
+            # Ollama-native endpoints don't support SSE streaming in the same way
+            _LOGGER.debug("Local non-OpenAI endpoint: falling back to non-streaming")
+            result = await self.get_response(messages, **kwargs)
+            yield result
+            return
+
+        headers = {"Content-Type": "application/json"}
+        payload = {
+            "messages": messages,
+            "stream": True,
+            "temperature": 0.7,
+            "top_p": 0.9,
+        }
+        if self.model:
+            payload["model"] = self.model
+
+        try:
+            async with self._session() as session:
+                async with session.post(
+                    self._chat_url,
+                    headers=headers,
+                    json=payload,
+                    timeout=aiohttp.ClientTimeout(total=300),
+                ) as resp:
+                    if resp.status != 200:
+                        _LOGGER.warning("Local stream error %d, falling back", resp.status)
+                        result = await self.get_response(messages, **kwargs)
+                        yield result
+                        return
+
+                    async for line in resp.content:
+                        decoded = line.decode("utf-8", errors="replace").strip()
+                        if not decoded or not decoded.startswith("data:"):
+                            continue
+                        data_str = decoded[5:].strip()
+                        if data_str == "[DONE]":
+                            break
+                        try:
+                            chunk = json.loads(data_str)
+                            content = (
+                                chunk.get("choices", [{}])[0]
+                                .get("delta", {})
+                                .get("content", "")
+                            )
+                            if content:
+                                yield content
+                        except (json.JSONDecodeError, IndexError, KeyError):
+                            continue
+        except Exception as e:
+            _LOGGER.warning("Local streaming failed (%s), falling back", e)
+            result = await self.get_response(messages, **kwargs)
+            yield result
+
+
 class LlamaClient(BaseAIClient):
     def __init__(self, token, model="Llama-4-Maverick-17B-128E-Instruct-FP8", hass=None):
         super().__init__(hass=hass)
@@ -886,6 +964,80 @@ class AnthropicClient(BaseAIClient):
                         if block.get("type") == "text":
                             return self.strip_thinking_tags(block.get("text", str(data)))
                 return str(data)
+
+
+    async def get_response_stream(self, messages, **kwargs):
+        """SSE streaming for the Anthropic Messages API.
+
+        Yields text chunks as they arrive. Falls back to non-streaming on error.
+        """
+        _LOGGER.debug("Anthropic stream: starting with model %s", self.model)
+        headers = {
+            "x-api-key": self.token,
+            "Content-Type": "application/json",
+            "anthropic-version": "2023-06-01",
+        }
+
+        system_message = None
+        anthropic_messages = []
+        for message in messages:
+            role = message.get("role", "user")
+            content = message.get("content", "")
+            if role == "system":
+                system_message = content
+            elif role == "user":
+                anthropic_messages.append({"role": "user", "content": content})
+            elif role == "tool":
+                anthropic_messages.append({"role": "user", "content": content})
+            elif role == "assistant":
+                anthropic_messages.append({"role": "assistant", "content": content})
+
+        payload = {
+            "model": self.model,
+            "max_tokens": 8192,
+            "temperature": 0.0,
+            "messages": anthropic_messages,
+            "stream": True,
+        }
+        if system_message:
+            payload["system"] = system_message
+
+        try:
+            async with self._session() as session:
+                async with session.post(
+                    self.api_url,
+                    headers=headers,
+                    json=payload,
+                    timeout=aiohttp.ClientTimeout(total=300),
+                ) as resp:
+                    if resp.status != 200:
+                        _LOGGER.warning("Anthropic stream error %d, falling back", resp.status)
+                        result = await self.get_response(messages, **kwargs)
+                        yield result
+                        return
+
+                    async for line in resp.content:
+                        decoded = line.decode("utf-8", errors="replace").strip()
+                        if not decoded or not decoded.startswith("data:"):
+                            continue
+                        data_str = decoded[5:].strip()
+                        if not data_str:
+                            continue
+                        try:
+                            event = json.loads(data_str)
+                            event_type = event.get("type", "")
+                            if event_type == "content_block_delta":
+                                text = event.get("delta", {}).get("text", "")
+                                if text:
+                                    yield text
+                            elif event_type == "message_stop":
+                                break
+                        except (json.JSONDecodeError, KeyError):
+                            continue
+        except Exception as e:
+            _LOGGER.warning("Anthropic streaming failed (%s), falling back", e)
+            result = await self.get_response(messages, **kwargs)
+            yield result
 
 
 class OpenRouterClient(BaseAIClient):
@@ -1358,6 +1510,100 @@ class AskSageClient(BaseAIClient):
             })
 
         return self.strip_thinking_tags(str(text))
+
+    async def get_response_stream(self, messages, **kwargs):
+        """SSE streaming for Ask Sage /query endpoint.
+
+        Ask Sage supports streaming when stream: true is added to the payload.
+        Yields text tokens as they arrive. Falls back to non-streaming on error.
+        """
+        if self.deep_agent:
+            # Deep Agent doesn't support streaming — fall back
+            _LOGGER.debug("Ask Sage Deep Agent: no streaming, falling back")
+            result = await self.get_response(messages, **kwargs)
+            yield result
+            return
+
+        _LOGGER.debug("Ask Sage stream: starting with model %s", self.model)
+
+        headers = {
+            "x-access-tokens": self.token,
+            "Content-Type": "application/json",
+        }
+
+        # Build message payload (same as get_response)
+        system_content = ""
+        asksage_messages = []
+        for msg in messages:
+            role = msg.get("role", "")
+            content = msg.get("content", "")
+            if role == "system":
+                system_content = content
+                continue
+            elif role in ("user", "me"):
+                asksage_messages.append({"user": "me", "message": content})
+            elif role in ("assistant", "gpt", "tool"):
+                asksage_messages.append({"user": "gpt", "message": content})
+
+        if len(asksage_messages) == 1 and asksage_messages[0]["user"] == "me":
+            message_payload = asksage_messages[0]["message"]
+        elif asksage_messages:
+            message_payload = asksage_messages
+        else:
+            user_msgs = [m for m in messages if m.get("role") == "user"]
+            message_payload = user_msgs[-1]["content"] if user_msgs else ""
+
+        payload = {
+            "message": message_payload,
+            "model": self.model,
+            "temperature": 0,
+            "dataset": "none",
+            "limit_references": 0,
+            "live": self.live,
+            "stream": True,
+        }
+        if system_content:
+            payload["system_prompt"] = system_content
+
+        try:
+            async with self._session() as session:
+                async with session.post(
+                    self.QUERY_URL,
+                    headers=headers,
+                    json=payload,
+                    timeout=aiohttp.ClientTimeout(total=300),
+                ) as resp:
+                    if resp.status != 200:
+                        _LOGGER.warning("Ask Sage stream error %d, falling back", resp.status)
+                        result = await self.get_response(messages, **kwargs)
+                        yield result
+                        return
+
+                    async for line in resp.content:
+                        decoded = line.decode("utf-8", errors="replace").strip()
+                        if not decoded:
+                            continue
+                        if decoded.startswith("data:"):
+                            data_str = decoded[5:].strip()
+                            if data_str == "[DONE]":
+                                break
+                            try:
+                                chunk = json.loads(data_str)
+                                # Ask Sage streaming may return tokens in 'message' or 'delta'
+                                text = chunk.get("message", "") or chunk.get("delta", "")
+                                if text:
+                                    yield text
+                            except json.JSONDecodeError:
+                                # Plain text token
+                                if data_str:
+                                    yield data_str
+                        elif decoded and not decoded.startswith(":"):
+                            # Some SSE implementations send bare text
+                            yield decoded
+        except Exception as e:
+            _LOGGER.warning("Ask Sage streaming failed (%s), falling back", e)
+            result = await self.get_response(messages, **kwargs)
+            yield result
 
 
 # === Main Agent ===
@@ -3265,9 +3511,26 @@ Then restart Home Assistant to see your new dashboard in the sidebar."""
                 _LOGGER.debug(f"Processing iteration {iteration} of {max_iterations}")
 
                 try:
-                    # Get AI response
+                    # Get AI response (with optional streaming)
                     _LOGGER.debug("Requesting response from AI provider")
-                    response = await self._get_ai_response()
+                    streaming_enabled = config.get("enable_streaming", False)
+                    t_start = time.monotonic()
+
+                    if streaming_enabled and hasattr(self.ai_client, 'get_response_stream'):
+                        response = await self._get_ai_response_stream()
+                    else:
+                        response = await self._get_ai_response()
+
+                    t_end = time.monotonic()
+                    thinking_duration = round(t_end - t_start, 1)
+
+                    # Extract thinking content BEFORE stripping
+                    thinking_content = BaseAIClient.extract_thinking(response) if response else None
+
+                    # Strip thinking tags from the response for further processing
+                    if response:
+                        response = BaseAIClient.strip_thinking_tags(response)
+
                     _LOGGER.debug("Received response from AI provider: %s", response)
 
                     try:
@@ -3560,6 +3823,10 @@ Then restart Home Assistant to see your new dashboard in the sidebar."""
                                 "success": True,
                                 "answer": response_data.get("response", ""),
                             }
+                            # Attach thinking content if present
+                            if thinking_content:
+                                result["thinking"] = thinking_content
+                                result["thinking_duration"] = thinking_duration
                             result = _with_debug(result)
                             self._trim_history()
                             self._set_cached_data(cache_key, result)
@@ -3586,6 +3853,9 @@ Then restart Home Assistant to see your new dashboard in the sidebar."""
                                 "success": True,
                                 "answer": json.dumps(response_data),
                             }
+                            if thinking_content:
+                                result["thinking"] = thinking_content
+                                result["thinking_duration"] = thinking_duration
                             result = _with_debug(result)
                             self._trim_history()
                             self._set_cached_data(cache_key, result)
@@ -3612,6 +3882,9 @@ Then restart Home Assistant to see your new dashboard in the sidebar."""
                                 "success": True,
                                 "answer": json.dumps(response_data),
                             }
+                            if thinking_content:
+                                result["thinking"] = thinking_content
+                                result["thinking_duration"] = thinking_duration
                             result = _with_debug(result)
                             self._trim_history()
                             self._set_cached_data(cache_key, result)
@@ -3939,6 +4212,9 @@ Then restart Home Assistant to see your new dashboard in the sidebar."""
                                 "success": True,
                                 "answer": json.dumps(wrapped_response),
                             }
+                            if thinking_content:
+                                result["thinking"] = thinking_content
+                                result["thinking_duration"] = thinking_duration
                             _LOGGER.debug("Wrapped non-JSON response as final_response")
                         except Exception as wrap_error:
                             _LOGGER.error(
@@ -4096,6 +4372,54 @@ Then restart Home Assistant to see your new dashboard in the sidebar."""
         raise Exception(
             f"Failed after {retry_count} retries. Last error: {str(last_error)}"
         )
+
+    async def _get_ai_response_stream(self):
+        """Get streaming response from AI provider, yielding chunks and firing WS events.
+
+        Returns the full accumulated response text.
+        """
+        recent_messages = self.conversation_history
+        if not recent_messages or recent_messages[0].get("role") != "system":
+            recent_messages = [self.system_prompt] + recent_messages
+
+        _LOGGER.debug("Streaming: sending %d messages to AI provider", len(recent_messages))
+
+        if not hasattr(self.ai_client, 'get_response_stream'):
+            _LOGGER.debug("Provider does not support streaming, falling back to non-streaming")
+            return await self._get_ai_response()
+
+        accumulated = []
+        try:
+            async for chunk in self.ai_client.get_response_stream(recent_messages):
+                accumulated.append(chunk)
+                # Fire WebSocket event for each chunk
+                try:
+                    partial_text = "".join(accumulated)
+                    self.hass.bus.async_fire("ai_agent_ha/stream_chunk", {
+                        "type": "stream_chunk",
+                        "text": partial_text,
+                    })
+                except Exception:
+                    pass  # Don't fail the stream for WS errors
+
+            full_text = "".join(accumulated)
+
+            if not full_text or full_text.strip() == "":
+                _LOGGER.warning("Streaming returned empty response, falling back")
+                return await self._get_ai_response()
+
+            # Fire stream end event
+            try:
+                self.hass.bus.async_fire("ai_agent_ha/stream_end", {
+                    "type": "stream_end",
+                })
+            except Exception:
+                pass
+
+            return full_text
+        except Exception as e:
+            _LOGGER.warning("Streaming failed (%s), falling back to non-streaming", e)
+            return await self._get_ai_response()
 
     def _trim_history(self) -> None:
         """Trim conversation_history to the last _max_history_len entries.
