@@ -86,6 +86,35 @@ const PROVIDERS = {
   local: "Local Model",
 };
 
+const CARD_TYPE_META = {
+  'weather-forecast':  { icon: 'mdi:weather-partly-cloudy', color: '#4fc3f7', label: 'Weather' },
+  'thermostat':        { icon: 'mdi:thermostat',            color: '#ef5350', label: 'Thermostat' },
+  'gauge':             { icon: 'mdi:gauge',                 color: '#66bb6a', label: 'Gauge' },
+  'sensor':            { icon: 'mdi:eye',                   color: '#ab47bc', label: 'Sensor' },
+  'entity':            { icon: 'mdi:power-plug',            color: '#7e57c2', label: 'Entity' },
+  'button':            { icon: 'mdi:gesture-tap-button',    color: '#26a69a', label: 'Button' },
+  'light':             { icon: 'mdi:lightbulb',             color: '#ffca28', label: 'Light' },
+  'switch':            { icon: 'mdi:toggle-switch',         color: '#42a5f5', label: 'Switch' },
+  'history-graph':     { icon: 'mdi:chart-line',            color: '#26c6da', label: 'History' },
+  'statistics-graph':  { icon: 'mdi:chart-bar',             color: '#ff7043', label: 'Stats' },
+  'media-control':     { icon: 'mdi:remote',                color: '#ec407a', label: 'Media' },
+  'map':               { icon: 'mdi:map',                   color: '#9ccc65', label: 'Map' },
+  'picture':           { icon: 'mdi:image',                 color: '#8d6e63', label: 'Picture' },
+  'markdown':          { icon: 'mdi:text',                  color: '#78909c', label: 'Text' },
+  'glance':            { icon: 'mdi:view-grid',             color: '#5c6bc0', label: 'Glance' },
+  'entities':          { icon: 'mdi:format-list-bulleted',  color: '#5c6bc0', label: 'Entities' },
+  'alarm-panel':       { icon: 'mdi:shield-home',           color: '#ef5350', label: 'Alarm' },
+  'logbook':           { icon: 'mdi:clipboard-list',        color: '#78909c', label: 'Log' },
+  'calendar':          { icon: 'mdi:calendar',              color: '#42a5f5', label: 'Calendar' },
+  'energy-distribution': { icon: 'mdi:lightning-bolt',      color: '#ffca28', label: 'Energy' },
+  'plant-status':      { icon: 'mdi:flower',                color: '#66bb6a', label: 'Plant' },
+  'humidifier':        { icon: 'mdi:air-humidifier',        color: '#4fc3f7', label: 'Humidity' },
+  'irrigation':        { icon: 'mdi:sprinkler',             color: '#66bb6a', label: 'Irrigation'},
+  'timer':             { icon: 'mdi:timer',                 color: '#ffca28', label: 'Timer' },
+  'input-boolean':     { icon: 'mdi:toggle-switch',         color: '#42a5f5', label: 'Toggle' },
+};
+const DEFAULT_CARD_META = { icon: 'mdi:card', color: '#90a4ae', label: 'Card' };
+
 class AiAgentHaPanel extends LitElement {
   static get properties() {
     return {
@@ -721,6 +750,78 @@ class AiAgentHaPanel extends LitElement {
         font-size: 0.85rem;
         cursor: pointer;
       }
+      .dashboard-preview {
+        max-height: 320px;
+        overflow-y: auto;
+        border: 1px solid var(--divider-color, rgba(255,255,255,0.12));
+        border-radius: 10px;
+        padding: 10px;
+        background: var(--secondary-background-color, rgba(0,0,0,0.15));
+        margin-bottom: 10px;
+      }
+      .preview-view-label {
+        font-size: 11px;
+        font-weight: 600;
+        color: var(--secondary-text-color);
+        text-transform: uppercase;
+        letter-spacing: 0.5px;
+        margin: 6px 0 4px;
+      }
+      .preview-card-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fill, minmax(80px, 1fr));
+        gap: 6px;
+        margin-bottom: 8px;
+      }
+      .preview-card-tile {
+        height: 70px;
+        border-radius: 8px;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        gap: 4px;
+        cursor: default;
+        transition: transform 0.15s;
+      }
+      .preview-card-tile:hover {
+        transform: scale(1.04);
+      }
+      .preview-card-title {
+        font-size: 10px;
+        color: var(--secondary-text-color);
+        text-align: center;
+        max-width: 76px;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        padding: 0 2px;
+      }
+      .preview-more-views {
+        font-size: 11px;
+        color: var(--secondary-text-color);
+        text-align: center;
+        padding: 4px 0;
+      }
+      .dashboard-change-row {
+        display: flex;
+        gap: 6px;
+        align-items: center;
+        margin-top: 6px;
+      }
+      .dashboard-change-input {
+        flex: 1;
+        padding: 7px 10px;
+        border-radius: 8px;
+        border: 1px solid var(--divider-color, rgba(255,255,255,0.15));
+        background: var(--card-background-color, #1e1e2e);
+        color: var(--primary-text-color);
+        font-size: 13px;
+      }
+      .dashboard-change-input:focus {
+        outline: none;
+        border-color: var(--primary-color);
+      }
     `;
   }
 
@@ -766,6 +867,8 @@ class AiAgentHaPanel extends LitElement {
     this._streamingText = '';
     this._streamChunkUnsub = null;
     this._streamEndUnsub = null;
+    this._dashboardChangeActive = null;
+    this._dashboardChangeText = '';
     console.debug("AI Agent HA Panel constructor called");
   }
 
@@ -1270,14 +1373,9 @@ class AiAgentHaPanel extends LitElement {
                       <span>${msg.dashboard.title || 'New Dashboard'}</span>
                     </div>
                     <div class="card-content">
-                      <div class="dashboard-chips">
-                        ${(msg.dashboard.views || []).map(view => html`
-                          <ha-chip>
-                            <ha-icon slot="icon" icon="${view.icon || 'mdi:tab'}"></ha-icon>
-                            ${view.title || 'View'}
-                          </ha-chip>
-                        `)}
-                      </div>
+
+                      ${this._renderDashboardPreview(msg.dashboard)}
+
                       <div class="dashboard-meta">
                         ${(() => {
                           const views = msg.dashboard.views || [];
@@ -1285,6 +1383,26 @@ class AiAgentHaPanel extends LitElement {
                           return `${views.length} view${views.length !== 1 ? 's' : ''} \u00b7 ${totalCards} card${totalCards !== 1 ? 's' : ''}`;
                         })()}
                       </div>
+
+                      ${this._dashboardChangeActive === msg.dashboard ? html`
+                        <div class="dashboard-change-row">
+                          <input
+                            class="dashboard-change-input"
+                            placeholder="Describe changes (e.g. add a weather card, remove the timer)..."
+                            .value=${this._dashboardChangeText || ''}
+                            @input=${e => { this._dashboardChangeText = e.target.value; }}
+                            @keydown=${e => { if (e.key === 'Enter' && this._dashboardChangeText?.trim()) this._requestDashboardChange(msg.dashboard); }}
+                          />
+                          <ha-button
+                            @click=${() => this._requestDashboardChange(msg.dashboard)}
+                            .disabled=${this._isLoading || !this._dashboardChangeText?.trim()}
+                          >Apply</ha-button>
+                          <ha-button
+                            @click=${() => { this._dashboardChangeActive = null; this._dashboardChangeText = ''; this.requestUpdate(); }}
+                          >Cancel</ha-button>
+                        </div>
+                      ` : ''}
+
                     </div>
                     <div class="card-actions">
                       ${!this._dashboardPickerActive || this._activeSuggestionDashboard !== msg.dashboard ? html`
@@ -1296,6 +1414,10 @@ class AiAgentHaPanel extends LitElement {
                           @click=${() => this._showDashboardPicker(msg.dashboard)}
                           .disabled=${this._isLoading || this._dashboardPickerLoading}
                         >${this._dashboardPickerLoading && this._activeSuggestionDashboard === msg.dashboard ? 'Loading...' : 'Add to Existing'}</ha-button>
+                        <ha-button
+                          @click=${() => { this._dashboardChangeActive = msg.dashboard; this._dashboardChangeText = ''; this.requestUpdate(); }}
+                          .disabled=${this._isLoading}
+                        >Request Changes</ha-button>
                       ` : html`
                         <div class="dashboard-picker">
                           <select class="dashboard-picker-select" id="dashboard-picker-select-${msg.dashboard.title?.replace(/\s/g,'_')}">
@@ -1643,6 +1765,72 @@ class AiAgentHaPanel extends LitElement {
       type: 'assistant',
       text: 'Automation creation cancelled. Would you like to try something else?'
     }];
+  }
+
+  _renderDashboardPreview(dashboard) {
+    const views = dashboard?.views;
+    if (!views || !Array.isArray(views) || views.length === 0) return html``;
+    const displayViews = views.slice(0, 3);
+    const remaining = views.length - 3;
+    return html`
+      <div class="dashboard-preview">
+        ${displayViews.map(view => html`
+          <div class="preview-view-label">${view.title || 'View'}</div>
+          <div class="preview-card-grid">
+            ${(view.cards || []).map(card => {
+              const cardType = card?.type || '';
+              const meta = CARD_TYPE_META[cardType] || DEFAULT_CARD_META;
+              const title = card?.title || meta.label;
+              const truncTitle = title.length > 12 ? title.slice(0, 12) + '\u2026' : title;
+              return html`
+                <div class="preview-card-tile"
+                     style="background:${meta.color}1a;border:1px solid ${meta.color}66">
+                  <ha-icon icon="${meta.icon}" style="color:${meta.color};--mdc-icon-size:22px"></ha-icon>
+                  <span class="preview-card-title">${truncTitle}</span>
+                </div>
+              `;
+            })}
+          </div>
+        `)}
+        ${remaining > 0 ? html`<div class="preview-more-views">+${remaining} more view${remaining !== 1 ? 's' : ''}</div>` : ''}
+      </div>
+    `;
+  }
+
+  async _requestDashboardChange(dashboard) {
+    const changeText = this._dashboardChangeText?.trim();
+    if (!changeText) return;
+
+    this._dashboardChangeActive = null;
+    this._dashboardChangeText = '';
+
+    // Add a user message with the change request
+    this._messages = [...this._messages, { type: 'user', text: `Please update the dashboard: ${changeText}` }];
+    this._isLoading = true;
+    this._error = null;
+    this._debugInfo = null;
+    this._thinkingExpanded = false;
+    this.requestUpdate();
+
+    try {
+      // Inject the change request into the prompt textarea and send
+      const promptEl = this.shadowRoot.querySelector('#prompt');
+      if (promptEl) {
+        promptEl.value = `Please update the "${dashboard.title}" dashboard with the following changes: ${changeText}. Return a complete updated dashboard_suggestion JSON.`;
+      }
+      await this.hass.callService('ai_agent_ha', 'query', {
+        prompt: `Please update the "${dashboard.title}" dashboard with the following changes: ${changeText}. Return a complete updated dashboard_suggestion JSON.`,
+        provider: this._selectedProvider,
+        debug: this._showThinking
+      });
+      // Clear the textarea after sending
+      if (promptEl) promptEl.value = '';
+    } catch (e) {
+      console.error('Error requesting dashboard change:', e);
+      this._isLoading = false;
+      this._error = e.message || 'Failed to request dashboard changes';
+      this.requestUpdate();
+    }
   }
 
   async _approveDashboard(dashboard) {
