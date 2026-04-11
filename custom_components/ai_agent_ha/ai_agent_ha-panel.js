@@ -91,7 +91,11 @@ class AiAgentHaPanel extends LitElement {
       _showProviderDropdown: { type: Boolean, reflect: false, attribute: false },
       _showThinking: { type: Boolean, reflect: false, attribute: false },
       _thinkingExpanded: { type: Boolean, reflect: false, attribute: false },
-      _debugInfo: { type: Object, reflect: false, attribute: false }
+      _debugInfo: { type: Object, reflect: false, attribute: false },
+      _dashboardPickerActive: { type: Boolean, reflect: false, attribute: false },
+      _existingDashboards: { type: Array, reflect: false, attribute: false },
+      _dashboardPickerLoading: { type: Boolean, reflect: false, attribute: false },
+      _activeSuggestionDashboard: { type: Object, reflect: false, attribute: false }
     };
   }
 
@@ -622,6 +626,24 @@ class AiAgentHaPanel extends LitElement {
         font-size: 14px;
         padding: 8px;
       }
+      .dashboard-picker {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        flex-wrap: wrap;
+        margin-top: 4px;
+      }
+      .dashboard-picker-select {
+        flex: 1;
+        min-width: 140px;
+        padding: 6px 10px;
+        border-radius: 8px;
+        border: 1px solid var(--divider-color, rgba(255,255,255,0.15));
+        background: var(--card-background-color, #1e1e2e);
+        color: var(--primary-text-color);
+        font-size: 0.85rem;
+        cursor: pointer;
+      }
     `;
   }
 
@@ -658,6 +680,10 @@ class AiAgentHaPanel extends LitElement {
     this._showThinking = false;
     this._thinkingExpanded = false;
     this._debugInfo = null;
+    this._dashboardPickerActive = false;
+    this._existingDashboards = [];
+    this._dashboardPickerLoading = false;
+    this._activeSuggestionDashboard = null;
     console.debug("AI Agent HA Panel constructor called");
   }
 
@@ -1063,14 +1089,34 @@ class AiAgentHaPanel extends LitElement {
                       </div>
                     </div>
                     <div class="card-actions">
-                      <ha-button
-                        @click=${() => this._approveDashboard(msg.dashboard)}
-                        .disabled=${this._isLoading}
-                      >Create Dashboard</ha-button>
-                      <ha-button
-                        @click=${() => this._rejectDashboard()}
-                        .disabled=${this._isLoading}
-                      >Cancel</ha-button>
+                      ${!this._dashboardPickerActive || this._activeSuggestionDashboard !== msg.dashboard ? html`
+                        <ha-button
+                          @click=${() => this._approveDashboard(msg.dashboard)}
+                          .disabled=${this._isLoading}
+                        >New Dashboard</ha-button>
+                        <ha-button
+                          @click=${() => this._showDashboardPicker(msg.dashboard)}
+                          .disabled=${this._isLoading || this._dashboardPickerLoading}
+                        >${this._dashboardPickerLoading && this._activeSuggestionDashboard === msg.dashboard ? 'Loading...' : 'Add to Existing'}</ha-button>
+                      ` : html`
+                        <div class="dashboard-picker">
+                          <select class="dashboard-picker-select" id="dashboard-picker-select-${msg.dashboard.title?.replace(/\s/g,'_')}">
+                            ${this._existingDashboards.map(d => html`
+                              <option value="${d.url_path}">${d.title || d.url_path}</option>
+                            `)}
+                          </select>
+                          <ha-button
+                            @click=${() => {
+                              const sel = this.shadowRoot.querySelector('.dashboard-picker-select');
+                              if (sel) this._addViewToExisting(msg.dashboard, sel.value);
+                            }}
+                            .disabled=${this._isLoading}
+                          >Add View</ha-button>
+                          <ha-button
+                            @click=${() => { this._dashboardPickerActive = false; this._activeSuggestionDashboard = null; this.requestUpdate(); }}
+                          >Cancel</ha-button>
+                        </div>
+                      `}
                     </div>
                   </ha-card>
                 ` : ''}
@@ -1402,6 +1448,67 @@ class AiAgentHaPanel extends LitElement {
     }];
   }
 
+  async _showDashboardPicker(dashboard) {
+    this._dashboardPickerLoading = true;
+    this._activeSuggestionDashboard = dashboard;
+    this.requestUpdate();
+    try {
+      // Fetch existing dashboards via Lovelace WebSocket API
+      const dashboards = await this.hass.callWS({ type: 'lovelace/dashboards' });
+      // Filter to user-created dashboards (exclude system ones without url_path)
+      this._existingDashboards = (dashboards || []).filter(d => d.url_path);
+      if (this._existingDashboards.length === 0) {
+        // No existing dashboards — fall back to creating new
+        this._messages = [...this._messages, {
+          type: 'assistant',
+          text: 'No existing dashboards found. Creating a new dashboard instead.'
+        }];
+        await this._approveDashboard(dashboard);
+        return;
+      }
+      this._dashboardPickerActive = true;
+    } catch (error) {
+      console.error('Error fetching dashboards:', error);
+      this._messages = [...this._messages, {
+        type: 'assistant',
+        text: `Could not load existing dashboards: ${error.message || error}. Please try creating a new dashboard instead.`
+      }];
+    } finally {
+      this._dashboardPickerLoading = false;
+      this.requestUpdate();
+    }
+  }
+
+  async _addViewToExisting(dashboard, targetDashboardUrl) {
+    if (this._isLoading) return;
+    this._isLoading = true;
+    this._dashboardPickerActive = false;
+    this._activeSuggestionDashboard = null;
+    try {
+      // Pass just the views array as the config to update_dashboard
+      const viewsConfig = { views: dashboard.views || [] };
+      const result = await this.hass.callService('ai_agent_ha', 'update_dashboard', {
+        dashboard_url: targetDashboardUrl,
+        dashboard_config: viewsConfig
+      });
+      const targetName = this._existingDashboards.find(d => d.url_path === targetDashboardUrl)?.title || targetDashboardUrl;
+      this._messages = [...this._messages, {
+        type: 'assistant',
+        text: result?.message || `"${dashboard.title}" view${dashboard.views?.length !== 1 ? 's' : ''} added to "${targetName}" successfully.`
+      }];
+    } catch (error) {
+      console.error('Error adding view to dashboard:', error);
+      this._messages = [...this._messages, {
+        type: 'assistant',
+        text: `Error adding view: ${error.message || error}`
+      }];
+    } finally {
+      this._clearLoadingState();
+      this._existingDashboards = [];
+      this.requestUpdate();
+    }
+  }
+
   shouldUpdate(changedProps) {
     // Only update if internal state changes, not on every hass update
     return changedProps.has('_messages') ||
@@ -1412,7 +1519,10 @@ class AiAgentHaPanel extends LitElement {
            changedProps.has('_showPromptHistory') ||
            changedProps.has('_availableProviders') ||
            changedProps.has('_selectedProvider') ||
-           changedProps.has('_showProviderDropdown');
+           changedProps.has('_showProviderDropdown') ||
+           changedProps.has('_dashboardPickerActive') ||
+           changedProps.has('_existingDashboards') ||
+           changedProps.has('_dashboardPickerLoading');
   }
 
   _clearChat() {
