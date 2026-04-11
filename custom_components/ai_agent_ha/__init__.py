@@ -15,7 +15,7 @@ from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers.typing import ConfigType
 
 from .agent import AiAgentHaAgent
-from .const import AI_PROVIDERS, DOMAIN
+from .const import AI_PROVIDERS, DOMAIN, VERSION
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -255,7 +255,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 )
                 result = {"error": "No AI agents configured"}
                 hass.bus.async_fire("ai_agent_ha_response", result)
-                return
+                return result
 
             provider = call.data.get("provider")
             if provider not in hass.data[DOMAIN]["agents"]:
@@ -265,7 +265,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     _LOGGER.error("No AI agents available")
                     result = {"error": "No AI agents configured"}
                     hass.bus.async_fire("ai_agent_ha_response", result)
-                    return
+                    return result
                 provider = available_providers[0]
                 _LOGGER.debug(f"Using fallback provider: {provider}")
 
@@ -276,10 +276,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 debug=call.data.get("debug", False),
             )
             hass.bus.async_fire("ai_agent_ha_response", result)
+            return result
         except Exception as e:
             _LOGGER.error("Query service error: %s", str(e), exc_info=True)
             result = {"error": "Unable to process request. Check Home Assistant logs for details."}
             hass.bus.async_fire("ai_agent_ha_response", result)
+            return result
 
     async def async_handle_create_automation(call):
         """Handle the create_automation service call."""
@@ -493,7 +495,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     websocket_api.async_register_command(hass, ws_get_providers)
 
     # Register services
-    hass.services.async_register(DOMAIN, "query", async_handle_query)
+    hass.services.async_register(
+        DOMAIN, "query", async_handle_query,
+        supports_response=SupportsResponse.OPTIONAL,
+    )
     hass.services.async_register(
         DOMAIN, "create_automation", async_handle_create_automation
     )
@@ -545,7 +550,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             config={
                 "_panel_custom": {
                     "name": "ai_agent_ha-panel",
-                    "module_url": "/frontend/ai_agent_ha/ai_agent_ha-panel.js",
+                    "module_url": f"/frontend/ai_agent_ha/ai_agent_ha-panel.js?v={VERSION}",
                     "embed_iframe": False,
                 }
             },
