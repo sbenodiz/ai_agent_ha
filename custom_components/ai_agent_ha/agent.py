@@ -459,6 +459,12 @@ class LocalClient(BaseAIClient):
                                     )
                                     pass
 
+                            # Before wrapping as final_response, try to extract embedded JSON
+                            _extracted = _extract_json_from_text(response_content)
+                            if _extracted and isinstance(_extracted, dict) and "request_type" in _extracted:
+                                _LOGGER.debug("Extracted embedded JSON from prose/markdown response")
+                                return json.dumps(_extracted)
+
                             # If it's plain text, wrap it in the expected JSON format
                             wrapped_response = {
                                 "request_type": "final_response",
@@ -502,6 +508,12 @@ class LocalClient(BaseAIClient):
                                     )
                                     pass
 
+                            # Before wrapping as final_response, try to extract embedded JSON
+                            _extracted = _extract_json_from_text(content)
+                            if _extracted and isinstance(_extracted, dict) and "request_type" in _extracted:
+                                _LOGGER.debug("Extracted embedded JSON from prose/markdown response (OpenAI format)")
+                                return json.dumps(_extracted)
+
                             # Wrap in expected format if plain text
                             wrapped_response = {
                                 "request_type": "final_response",
@@ -533,6 +545,12 @@ class LocalClient(BaseAIClient):
                                         "Invalid JSON from local model, treating as plain text (generic format)"
                                     )
                                     pass
+
+                            # Before wrapping as final_response, try to extract embedded JSON
+                            _extracted = _extract_json_from_text(content)
+                            if _extracted and isinstance(_extracted, dict) and "request_type" in _extracted:
+                                _LOGGER.debug("Extracted embedded JSON from prose/markdown response (generic format)")
+                                return json.dumps(_extracted)
 
                             wrapped_response = {
                                 "request_type": "final_response",
@@ -573,6 +591,11 @@ class LocalClient(BaseAIClient):
                                 )
                             else:
                                 content = self.strip_thinking_tags(str(message_content))
+                            # Before wrapping as final_response, try to extract embedded JSON
+                            _extracted = _extract_json_from_text(content)
+                            if _extracted and isinstance(_extracted, dict) and "request_type" in _extracted:
+                                _LOGGER.debug("Extracted embedded JSON from message field response")
+                                return json.dumps(_extracted)
                             return json.dumps(
                                 {"request_type": "final_response", "response": content}
                             )
@@ -603,6 +626,12 @@ class LocalClient(BaseAIClient):
                                     return response_text
                             except json.JSONDecodeError:
                                 pass
+
+                        # Before wrapping as final_response, try to extract embedded JSON
+                        _extracted = _extract_json_from_text(response_text)
+                        if _extracted and isinstance(_extracted, dict) and "request_type" in _extracted:
+                            _LOGGER.debug("Extracted embedded JSON from raw text response")
+                            return json.dumps(_extracted)
 
                         # If not valid JSON, wrap the raw text in expected format
                         _LOGGER.debug("Response is not JSON, wrapping plain text")
@@ -3447,12 +3476,26 @@ class AiAgentHaAgent:
                                         "Fallback JSON extraction also failed: %s",
                                         str(e2),
                                     )
-                                    raise e  # Re-raise the original error
+                                    # Try _extract_json_from_text as last resort
+                                    _extracted = _extract_json_from_text(response_clean)
+                                    if _extracted and isinstance(_extracted, dict):
+                                        response_data = _extracted
+                                        response = json.dumps(_extracted)
+                                        _LOGGER.debug("Recovered JSON via _extract_json_from_text()")
+                                    else:
+                                        raise e  # Re-raise the original error
                             else:
-                                _LOGGER.warning(
-                                    "Could not find JSON boundaries in response"
-                                )
-                                raise e  # Re-raise the original error
+                                # Try _extract_json_from_text before giving up
+                                _extracted = _extract_json_from_text(response_clean)
+                                if _extracted and isinstance(_extracted, dict):
+                                    response_data = _extracted
+                                    response = json.dumps(_extracted)
+                                    _LOGGER.debug("Recovered JSON via _extract_json_from_text() (no braces found)")
+                                else:
+                                    _LOGGER.warning(
+                                        "Could not find JSON boundaries in response"
+                                    )
+                                    raise e  # Re-raise the original error
 
                         if response_data is None:
                             raise json.JSONDecodeError(
@@ -4126,42 +4169,62 @@ class AiAgentHaAgent:
                             ]
                             return result
 
-                        # Try YAML / markdown-wrapped JSON recovery for dashboard responses
-                        yaml_dashboard_indicators = ["title:", "views:", "cards:", "type: custom:", "type: entities", "dashboard:", "```yaml", "```json"]
-                        if any(indicator in response for indicator in yaml_dashboard_indicators):
-                            recovered = _extract_json_from_text(response)
-                            if recovered is not None:
-                                # Unwrap top-level `dashboard:` key if present
-                                if "dashboard" in recovered and isinstance(recovered["dashboard"], dict):
-                                    recovered = recovered["dashboard"]
-                                if isinstance(recovered, dict) and any(
-                                    k in recovered for k in ["title", "views", "cards"]
-                                ):
-                                    _LOGGER.warning(
-                                        "LLM returned YAML/markdown for dashboard — recovered via _extract_json_from_text()"
-                                    )
-                                    response_data = {
-                                        "request_type": "dashboard_suggestion",
-                                        "dashboard": recovered,
+                        # Try to extract embedded JSON from prose/markdown/YAML response
+                        extracted = _extract_json_from_text(response)
+                        if extracted and isinstance(extracted, dict):
+                            # If extracted JSON has request_type, use it directly
+                            if "request_type" in extracted:
+                                _LOGGER.debug("Extracted embedded JSON with request_type from non-JSON response")
+                                self.conversation_history.append(
+                                    {
+                                        "role": "assistant",
+                                        "content": json.dumps(extracted),
                                     }
-                                    # Route through the normal dashboard_suggestion path
-                                    self.conversation_history.append(
-                                        {
-                                            "role": "assistant",
-                                            "content": json.dumps(response_data),
-                                        }
-                                    )
-                                    result = {
-                                        "success": True,
-                                        "answer": json.dumps(response_data),
+                                )
+                                result = {
+                                    "success": True,
+                                    "answer": json.dumps(extracted),
+                                }
+                                if thinking_content:
+                                    result["thinking"] = thinking_content
+                                    result["thinking_duration"] = thinking_duration
+                                result = _with_debug(result)
+                                self._trim_history()
+                                self._set_cached_data(cache_key, result)
+                                return result
+
+                            # Unwrap top-level `dashboard:` key if present
+                            if "dashboard" in extracted and isinstance(extracted["dashboard"], dict):
+                                extracted = extracted["dashboard"]
+                            # Check if it looks like a dashboard config
+                            if isinstance(extracted, dict) and any(
+                                k in extracted for k in ["title", "views", "cards"]
+                            ):
+                                _LOGGER.warning(
+                                    "LLM returned YAML/markdown for dashboard — recovered via _extract_json_from_text()"
+                                )
+                                response_data = {
+                                    "request_type": "dashboard_suggestion",
+                                    "dashboard": extracted,
+                                }
+                                # Route through the normal dashboard_suggestion path
+                                self.conversation_history.append(
+                                    {
+                                        "role": "assistant",
+                                        "content": json.dumps(response_data),
                                     }
-                                    if thinking_content:
-                                        result["thinking"] = thinking_content
-                                        result["thinking_duration"] = thinking_duration
-                                    result = _with_debug(result)
-                                    self._trim_history()
-                                    self._set_cached_data(cache_key, result)
-                                    return result
+                                )
+                                result = {
+                                    "success": True,
+                                    "answer": json.dumps(response_data),
+                                }
+                                if thinking_content:
+                                    result["thinking"] = thinking_content
+                                    result["thinking_duration"] = thinking_duration
+                                result = _with_debug(result)
+                                self._trim_history()
+                                self._set_cached_data(cache_key, result)
+                                return result
 
                         # If response is not valid JSON, try to wrap it as a final response
                         try:
