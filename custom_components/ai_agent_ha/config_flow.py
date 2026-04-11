@@ -74,7 +74,7 @@ DEFAULT_MODELS = {
     "openai": "gpt-5",
     "gemini": "gemini-2.5-flash",
     "openrouter": "openai/gpt-4o",
-    "anthropic": "claude-sonnet-4-5-20250929",
+    "anthropic": "claude-opus-4-6",
     "alter": "",  # User enters custom model
     "zai": "glm-4.7",  # Z.ai's latest flagship model
     "local": "llama3.2",  # Updated to use llama3.2 as default
@@ -123,6 +123,9 @@ AVAILABLE_MODELS = {
         "deepseek/deepseek-r1",
     ],
     "anthropic": [
+        "claude-opus-4-6",
+        "claude-sonnet-4-6",
+        "claude-haiku-4-5-20251001",
         "claude-sonnet-4-5-20250929",
         "claude-sonnet-4-20250514",
         "claude-3-5-sonnet-20241022",
