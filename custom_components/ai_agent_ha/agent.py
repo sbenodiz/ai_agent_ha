@@ -2826,9 +2826,12 @@ Then restart Home Assistant to see your new dashboard in the sidebar."""
                 _LOGGER.debug("Adding system message to new conversation")
                 self.conversation_history.append(self.system_prompt)
 
-            # Add user query to conversation
+            # Add user query to conversation.
+            # Record the index so we can roll back to this point on error,
+            # preventing a failed query from poisoning the next call.
+            history_rollback_index = len(self.conversation_history)
             self.conversation_history.append({"role": "user", "content": user_query})
-            _LOGGER.debug("Added user query to conversation history")
+            _LOGGER.debug("Added user query to conversation history (rollback index=%d)", history_rollback_index)
 
             max_iterations = 5  # Prevent infinite loops
             iteration = 0
@@ -3485,7 +3488,8 @@ Then restart Home Assistant to see your new dashboard in the sidebar."""
                                     "error": "AI generated corrupted automation response. Please try again with a more specific automation request.",
                                 }
                             )
-                            self._set_cached_data(cache_key, result)
+                            # Roll back history and do not cache — let the user retry fresh.
+                            self.conversation_history = self.conversation_history[:history_rollback_index]
                             return result
 
                         # If response is not valid JSON, try to wrap it as a final response
@@ -3521,11 +3525,21 @@ Then restart Home Assistant to see your new dashboard in the sidebar."""
                             }
 
                         result = _with_debug(result)
-                        self._set_cached_data(cache_key, result)
+                        # Only cache successful wraps; on failure roll back history and
+                        # skip caching so the next identical prompt retries fresh.
+                        if result.get("success", False):
+                            self._set_cached_data(cache_key, result)
+                        else:
+                            self.conversation_history = self.conversation_history[:history_rollback_index]
                         return result
 
                 except Exception as e:
                     _LOGGER.exception("Error processing AI response: %s", str(e))
+                    # Roll back conversation history to before this query so the
+                    # failed prompt doesn't contaminate the next call.
+                    self.conversation_history = self.conversation_history[:history_rollback_index]
+                    _LOGGER.debug("Rolled back conversation history to index %d after error", history_rollback_index)
+                    # Do NOT cache error results — let the next identical query retry fresh.
                     return _with_debug(
                         {
                             "success": False,
@@ -3535,16 +3549,25 @@ Then restart Home Assistant to see your new dashboard in the sidebar."""
 
             # If we've reached max iterations without a final response
             _LOGGER.warning("Reached maximum iterations without final response")
+            # Roll back history — the query loop ran but never settled on a final response.
+            self.conversation_history = self.conversation_history[:history_rollback_index]
+            _LOGGER.debug("Rolled back conversation history to index %d after max iterations", history_rollback_index)
             result = {
                 "success": False,
                 "error": "Maximum iterations reached without final response",
             }
             result = _with_debug(result)
-            self._set_cached_data(cache_key, result)
+            # Do NOT cache — let the user retry and get a fresh attempt.
             return result
 
         except Exception as e:
             _LOGGER.exception("Error in process_query: %s", str(e))
+            # Roll back if history_rollback_index was set before the exception.
+            try:
+                self.conversation_history = self.conversation_history[:history_rollback_index]
+                _LOGGER.debug("Rolled back conversation history to index %d after outer exception", history_rollback_index)
+            except NameError:
+                pass  # Exception occurred before history_rollback_index was set
             return _with_debug(
                 {"success": False, "error": f"Error in process_query: {str(e)}"}
             )
