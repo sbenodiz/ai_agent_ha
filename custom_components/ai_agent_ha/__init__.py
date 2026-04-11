@@ -54,8 +54,132 @@ async def async_migrate_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     return True
 
 
+async def _cleanup_legacy_dashboard_config(hass: HomeAssistant) -> None:
+    """Remove stale lovelace dashboard entries written by pre-v1.2.4 create_dashboard.
+
+    The old file-based approach wrote entries to configuration.yaml like:
+        lovelace:
+          dashboards:
+            lighting:
+              mode: yaml
+              filename: ui-lovelace-lighting.yaml
+
+    These entries fail HA config validation if the url_path has no hyphen,
+    and are no longer needed since v1.2.4 uses the Lovelace Storage API.
+    """
+    import os
+
+    config_file = hass.config.path("configuration.yaml")
+
+    def _do_cleanup():
+        try:
+            with open(config_file, "r") as f:
+                content = f.read()
+
+            # Only proceed if there's a lovelace section with our marker
+            if "ui-lovelace-" not in content:
+                return []  # Nothing to clean
+
+            import yaml as _yaml
+
+            try:
+                config = _yaml.safe_load(content)
+            except Exception:
+                return []  # Don't touch if we can't parse
+
+            if not isinstance(config, dict):
+                return []
+
+            lovelace = config.get("lovelace")
+            if not isinstance(lovelace, dict):
+                return []
+
+            dashboards = lovelace.get("dashboards")
+            if not isinstance(dashboards, dict):
+                return []
+
+            # Find entries with ui-lovelace- filenames (AI-generated)
+            stale_keys = [
+                k
+                for k, v in dashboards.items()
+                if isinstance(v, dict)
+                and str(v.get("filename", "")).startswith("ui-lovelace-")
+            ]
+
+            if not stale_keys:
+                return []
+
+            # Remove stale entries
+            for key in stale_keys:
+                del dashboards[key]
+                _LOGGER.warning(
+                    "Removed stale AI-generated lovelace dashboard entry '%s' from "
+                    "configuration.yaml. This entry was created by a pre-v1.2.4 version "
+                    "of AI Agent HA and is no longer needed.",
+                    key,
+                )
+
+            # If dashboards section is now empty, remove it
+            if not dashboards:
+                del lovelace["dashboards"]
+
+            # If lovelace section is now empty, remove the whole key
+            if not lovelace:
+                del config["lovelace"]
+
+            new_content = _yaml.dump(
+                config, default_flow_style=False, allow_unicode=True
+            )
+
+            with open(config_file, "w") as f:
+                f.write(new_content)
+
+            return stale_keys
+
+        except Exception as e:
+            _LOGGER.error("Error during legacy lovelace config cleanup: %s", str(e))
+            return []
+
+    def _cleanup_orphan_files(stale_keys):
+        """Delete orphaned ui-lovelace-*.yaml files."""
+        for key in stale_keys:
+            for filename in [f"ui-lovelace-{key}.yaml", f"dashboards/{key}.yaml"]:
+                filepath = hass.config.path(filename)
+                try:
+                    if os.path.exists(filepath):
+                        os.remove(filepath)
+                        _LOGGER.warning(
+                            "Removed orphaned dashboard file: %s", filepath
+                        )
+                except Exception as e:
+                    _LOGGER.error(
+                        "Could not remove orphaned file %s: %s", filepath, str(e)
+                    )
+
+    stale_keys = await hass.async_add_executor_job(_do_cleanup)
+    if stale_keys:
+        await hass.async_add_executor_job(_cleanup_orphan_files, stale_keys)
+        _LOGGER.warning(
+            "AI Agent HA: Cleaned up %d stale lovelace dashboard configuration "
+            "entries from configuration.yaml. These were created by a pre-v1.2.4 "
+            "version. Dashboards now use HA Storage API and no configuration.yaml "
+            "changes are needed.",
+            len(stale_keys),
+        )
+        hass.components.persistent_notification.async_create(
+            f"AI Agent HA cleaned up {len(stale_keys)} stale dashboard configuration "
+            "entries from configuration.yaml that were created by a previous version. "
+            "No action needed — dashboards now use HA Storage API.",
+            title="AI Agent HA: Legacy Config Cleaned",
+            notification_id="ai_agent_ha_legacy_cleanup",
+        )
+
+
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up AI Agent HA from a config entry."""
+    # Clean up any stale lovelace entries from pre-v1.2.4 file-based dashboard creation
+    await _cleanup_legacy_dashboard_config(hass)
+
     try:
         # Handle version compatibility
         if not hasattr(entry, "version") or entry.version != 1:
