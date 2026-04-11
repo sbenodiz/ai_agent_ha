@@ -4156,17 +4156,30 @@ Then restart Home Assistant to see your new dashboard in the sidebar."""
                             # Go to next iteration to continue the loop
                             continue
 
-                        # Unknown request type
-                        _LOGGER.warning(
-                            "Unknown response type: %s",
+                        # Unknown or missing request_type — treat as final_response
+                        # (model returned valid JSON but without a recognised request_type,
+                        # e.g. a plain {"message": "..."} or temperature data object)
+                        _LOGGER.debug(
+                            "Unrecognised request_type %r — treating as final_response",
                             response_data.get("request_type"),
                         )
-                        return _with_debug(
-                            {
-                                "success": False,
-                                "error": f"Unknown response type: {response_data.get('request_type')}",
-                            }
+                        self.conversation_history.append(
+                            {"role": "assistant", "content": json.dumps(response_data)}
                         )
+                        fallback_text = (
+                            response_data.get("response")
+                            or response_data.get("message")
+                            or response_data.get("answer")
+                            or json.dumps(response_data)
+                        )
+                        result = {"success": True, "answer": fallback_text}
+                        if thinking_content:
+                            result["thinking"] = thinking_content
+                            result["thinking_duration"] = thinking_duration
+                        result = _with_debug(result)
+                        self._trim_history()
+                        self._set_cached_data(cache_key, result)
+                        return result
 
                     except json.JSONDecodeError as e:
                         # Check if this is a local provider that might have already wrapped the response
