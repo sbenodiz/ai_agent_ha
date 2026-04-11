@@ -161,9 +161,7 @@ class LocalClient(BaseAIClient):
             if self.model:
                 payload["model"] = self.model
             request_url = self._chat_url
-            _LOGGER.debug(
-                "Using OpenAI-compatible format → POST %s", request_url
-            )
+            _LOGGER.debug("Using OpenAI-compatible format → POST %s", request_url)
         else:
             # Legacy Ollama-native format: flatten messages into a prompt string
             prompt = ""
@@ -185,9 +183,7 @@ class LocalClient(BaseAIClient):
             if self.model:
                 payload["model"] = self.model
             request_url = self.url
-            _LOGGER.debug(
-                "Using Ollama-native format → POST %s", request_url
-            )
+            _LOGGER.debug("Using Ollama-native format → POST %s", request_url)
 
         # Note: Payloads don't contain auth tokens (those are in headers), but may contain user prompts
         _LOGGER.debug("Local API request payload: %s", json.dumps(payload, indent=2))
@@ -2746,7 +2742,9 @@ Then restart Home Assistant to see your new dashboard in the sidebar."""
                     if selected_provider == "openai":
                         base_url = config.get("openai_base_url", "") or ""
                         self.ai_client = provider_settings["client_class"](
-                            token=token, model=provider_settings["model"], base_url=base_url
+                            token=token,
+                            model=provider_settings["model"],
+                            base_url=base_url,
                         )
                     else:
                         self.ai_client = provider_settings["client_class"](
