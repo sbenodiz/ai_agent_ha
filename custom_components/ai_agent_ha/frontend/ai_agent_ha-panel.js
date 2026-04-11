@@ -2037,16 +2037,29 @@ class AiAgentHaPanel extends LitElement {
     this._dashboardPickerActive = false;
     this._activeSuggestionDashboard = null;
     try {
-      // Pass just the views array as the config to update_dashboard
-      const viewsConfig = { views: dashboard.views || [] };
-      const result = await this.hass.callService('ai_agent_ha', 'update_dashboard', {
-        dashboard_url: targetDashboardUrl,
-        dashboard_config: viewsConfig
-      }, {}, true);
+      // Step 1: Fetch existing dashboard config
+      const existing = await this.hass.callWS({
+        type: 'lovelace/config',
+        url_path: targetDashboardUrl,
+      });
+
+      // Step 2: Merge — append new views to existing views
+      const existingViews = (existing && existing.views) ? existing.views : [];
+      const newViews = dashboard.views || [];
+      const mergedViews = [...existingViews, ...newViews];
+
+      // Step 3: Save merged config back
+      await this.hass.callWS({
+        type: 'lovelace/config/save',
+        url_path: targetDashboardUrl,
+        config: { views: mergedViews },
+      });
+
       const targetName = this._existingDashboards.find(d => d.url_path === targetDashboardUrl)?.title || targetDashboardUrl;
+      const viewWord = newViews.length !== 1 ? 'views' : 'view';
       this._messages = [...this._messages, {
         type: 'assistant',
-        text: result?.message || `"${dashboard.title}" view${dashboard.views?.length !== 1 ? 's' : ''} added to "${targetName}" successfully.`
+        text: `Added ${newViews.length} ${viewWord} to "${targetName}" successfully. Navigate to the dashboard to see the new tab${newViews.length !== 1 ? 's' : ''}.`
       }];
     } catch (error) {
       console.error('Error adding view to dashboard:', error);
