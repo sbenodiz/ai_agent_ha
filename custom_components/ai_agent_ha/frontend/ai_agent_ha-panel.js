@@ -769,6 +769,15 @@ class AiAgentHaPanel extends LitElement {
         letter-spacing: 0.5px;
         margin: 6px 0 4px;
       }
+      .preview-group-label {
+        font-size: 10px;
+        font-weight: 600;
+        color: var(--primary-color);
+        text-transform: uppercase;
+        letter-spacing: 0.5px;
+        margin: 4px 0 2px;
+        padding-left: 2px;
+      }
       .preview-card-grid {
         display: grid;
         grid-template-columns: repeat(auto-fill, minmax(80px, 1fr));
@@ -1710,6 +1719,20 @@ class AiAgentHaPanel extends LitElement {
         message.text = 'I created a dashboard for you. Review it below.';
       }
 
+      // YAML bleed guard: if text starts with YAML dashboard keys, treat as dashboard response
+      if (!message.dashboard && message.text) {
+        const trimmed = message.text.trim();
+        if (/^(dashboard:|title:|views:)/m.test(trimmed)) {
+          try {
+            // Attempt to parse the YAML text — it may be a dashboard the LLM
+            // returned as YAML instead of JSON.  The Python side should have
+            // caught this, but guard the frontend too.
+            console.warn('Detected YAML dashboard bleed in message text — suppressing raw display');
+            message.text = 'The AI returned a dashboard in an unexpected format. Please try your request again.';
+          } catch (_) { /* ignore */ }
+        }
+      }
+
       console.debug("Adding message to UI:", message);
       this._messages = [...this._messages, message];
       this._saveHistoryToStorage();
@@ -1774,6 +1797,28 @@ class AiAgentHaPanel extends LitElement {
     }];
   }
 
+  _getCardGroup(card) {
+    const cardType = (card?.type || '').toLowerCase();
+    const entity = (card?.entity || card?.entities?.[0] || '').toLowerCase();
+    if (cardType.startsWith('light') || entity.startsWith('light.'))
+      return 'Lights';
+    if (cardType === 'media-control' || entity.startsWith('media_player.'))
+      return 'Media';
+    if (cardType === 'irrigation' || cardType.includes('valve') ||
+        entity.startsWith('valve.') ||
+        (entity.startsWith('input_boolean.') && (entity.includes('irrigat') || entity.includes('zone') || entity.includes('sprinkler'))))
+      return 'Irrigation';
+    if (entity.startsWith('switch.'))
+      return 'Switches';
+    if (entity.startsWith('sensor.') || entity.startsWith('binary_sensor.'))
+      return 'Sensors';
+    if (cardType === 'weather-forecast' || entity.startsWith('weather.'))
+      return 'Weather';
+    if (cardType === 'thermostat' || entity.startsWith('climate.'))
+      return 'Climate';
+    return 'Other';
+  }
+
   _renderDashboardPreview(dashboard) {
     const views = dashboard?.views;
     if (!views || !Array.isArray(views) || views.length === 0) return html``;
@@ -1783,23 +1828,39 @@ class AiAgentHaPanel extends LitElement {
       <div class="dashboard-preview">
         ${displayViews.map(view => html`
           <div class="preview-view-label">${view.title || 'View'}</div>
-          ${(view.cards && view.cards.length > 0) ? html`
-          <div class="preview-card-grid">
-            ${view.cards.map(card => {
-              const cardType = card?.type || '';
-              const meta = CARD_TYPE_META[cardType] || DEFAULT_CARD_META;
-              const title = card?.title || meta.label;
-              const truncTitle = title.length > 12 ? title.slice(0, 12) + '\u2026' : title;
-              return html`
-                <div class="preview-card-tile"
-                     style="background:${meta.color}1a;border:1px solid ${meta.color}66">
-                  <ha-icon icon="${meta.icon}" style="color:${meta.color};--mdc-icon-size:22px"></ha-icon>
-                  <span class="preview-card-title">${truncTitle}</span>
-                </div>
-              `;
-            })}
-          </div>
-          ` : ''}
+          ${(view.cards && view.cards.length > 0) ? (() => {
+            // Group cards by category
+            const groups = {};
+            view.cards.forEach(card => {
+              const group = this._getCardGroup(card);
+              if (!groups[group]) groups[group] = [];
+              groups[group].push(card);
+            });
+            const groupOrder = ['Lights', 'Climate', 'Weather', 'Switches', 'Sensors', 'Irrigation', 'Media', 'Other'];
+            const sortedGroups = Object.keys(groups).sort((a, b) => {
+              const ai = groupOrder.indexOf(a);
+              const bi = groupOrder.indexOf(b);
+              return (ai === -1 ? 99 : ai) - (bi === -1 ? 99 : bi);
+            });
+            return html`${sortedGroups.map(groupName => html`
+              ${sortedGroups.length > 1 ? html`<div class="preview-group-label">${groupName}</div>` : ''}
+              <div class="preview-card-grid">
+                ${groups[groupName].map(card => {
+                  const cardType = card?.type || '';
+                  const meta = CARD_TYPE_META[cardType] || DEFAULT_CARD_META;
+                  const title = card?.title || meta.label;
+                  const truncTitle = title.length > 12 ? title.slice(0, 12) + '\u2026' : title;
+                  return html`
+                    <div class="preview-card-tile"
+                         style="background:${meta.color}1a;border:1px solid ${meta.color}66">
+                      <ha-icon icon="${meta.icon}" style="color:${meta.color};--mdc-icon-size:22px"></ha-icon>
+                      <span class="preview-card-title">${truncTitle}</span>
+                    </div>
+                  `;
+                })}
+              </div>
+            `)}`;
+          })() : ''}
         `)}
         ${remaining > 0 ? html`<div class="preview-more-views">+${remaining} more view${remaining !== 1 ? 's' : ''}</div>` : ''}
       </div>
@@ -1852,20 +1913,27 @@ class AiAgentHaPanel extends LitElement {
     if (this._isLoading) return;
     this._isLoading = true;
     try {
+      // 5th argument `true` enables return_response (HA 2023.4+)
       const result = await this.hass.callService('ai_agent_ha', 'create_dashboard', {
         dashboard_config: dashboard
-      });
+      }, {}, true);
 
       console.debug("Dashboard creation result:", result);
 
-      // The result should be an object with a message property
-      if (result && result.message) {
+      // Check for service response with success/error
+      const response = result?.response || result;
+      if (response && response.error) {
         this._messages = [...this._messages, {
           type: 'assistant',
-          text: result.message
+          text: `Error: ${response.error}`
+        }];
+      } else if (response && response.message) {
+        this._messages = [...this._messages, {
+          type: 'assistant',
+          text: response.message
         }];
       } else {
-        // Fallback success message if no message is provided
+        // Fallback success message
         this._messages = [...this._messages, {
           type: 'assistant',
           text: `Dashboard "${dashboard.title}" has been created successfully!`
@@ -1932,7 +2000,7 @@ class AiAgentHaPanel extends LitElement {
       const result = await this.hass.callService('ai_agent_ha', 'update_dashboard', {
         dashboard_url: targetDashboardUrl,
         dashboard_config: viewsConfig
-      });
+      }, {}, true);
       const targetName = this._existingDashboards.find(d => d.url_path === targetDashboardUrl)?.title || targetDashboardUrl;
       this._messages = [...this._messages, {
         type: 'assistant',
