@@ -1233,6 +1233,13 @@ class AiAgentHaAgent:
         self._last_request_time = 0
         self._request_count = 0
         self._request_window_start = time.time()
+        # Serialise access to process_query so concurrent calls don't
+        # interleave conversation_history reads/writes.
+        self._query_lock = asyncio.Lock()
+        # Maximum conversation_history entries kept in memory.
+        # _get_ai_response only sends the last 10 to the model, but we
+        # keep a larger buffer for rollback and debug trace purposes.
+        self._max_history_len = 50
 
         provider = config.get("ai_provider", "openai")
         models_config = config.get("models", {})
@@ -2664,6 +2671,13 @@ Then restart Home Assistant to see your new dashboard in the sidebar."""
         self, user_query: str, provider: Optional[str] = None, debug: bool = False
     ) -> Dict[str, Any]:
         """Process a user query with input validation and rate limiting."""
+        async with self._query_lock:
+          return await self._process_query_inner(user_query, provider, debug)
+
+    async def _process_query_inner(
+        self, user_query: str, provider: Optional[str] = None, debug: bool = False
+    ) -> Dict[str, Any]:
+        """Inner implementation of process_query, always called under _query_lock."""
         try:
             if not user_query or not isinstance(user_query, str):
                 return {"success": False, "error": "Invalid query format"}
@@ -3139,6 +3153,7 @@ Then restart Home Assistant to see your new dashboard in the sidebar."""
                                 "answer": response_data.get("response", ""),
                             }
                             result = _with_debug(result)
+                            self._trim_history()
                             self._set_cached_data(cache_key, result)
                             return result
                         elif (
@@ -3164,6 +3179,7 @@ Then restart Home Assistant to see your new dashboard in the sidebar."""
                                 "answer": json.dumps(response_data),
                             }
                             result = _with_debug(result)
+                            self._trim_history()
                             self._set_cached_data(cache_key, result)
                             return result
                         elif (
@@ -3189,6 +3205,7 @@ Then restart Home Assistant to see your new dashboard in the sidebar."""
                                 "answer": json.dumps(response_data),
                             }
                             result = _with_debug(result)
+                            self._trim_history()
                             self._set_cached_data(cache_key, result)
                             return result
                         elif response_data.get("request_type") in [
@@ -3528,6 +3545,7 @@ Then restart Home Assistant to see your new dashboard in the sidebar."""
                         # Only cache successful wraps; on failure roll back history and
                         # skip caching so the next identical prompt retries fresh.
                         if result.get("success", False):
+                            self._trim_history()
                             self._set_cached_data(cache_key, result)
                         else:
                             self.conversation_history = self.conversation_history[:history_rollback_index]
@@ -3664,6 +3682,24 @@ Then restart Home Assistant to see your new dashboard in the sidebar."""
         raise Exception(
             f"Failed after {retry_count} retries. Last error: {str(last_error)}"
         )
+
+    def _trim_history(self) -> None:
+        """Trim conversation_history to the last _max_history_len entries.
+
+        Preserves the system prompt at position 0 when trimming, so the
+        model always has the instruction context available.
+        """
+        if len(self.conversation_history) > self._max_history_len:
+            # Keep the system prompt (index 0) + the tail
+            tail_size = self._max_history_len - 1
+            self.conversation_history = (
+                [self.conversation_history[0]]
+                + self.conversation_history[-tail_size:]
+            )
+            _LOGGER.debug(
+                "Trimmed conversation history to %d entries",
+                len(self.conversation_history),
+            )
 
     def clear_conversation_history(self) -> None:
         """Clear the conversation history and cache."""
