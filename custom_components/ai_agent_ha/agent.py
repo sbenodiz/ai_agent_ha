@@ -25,8 +25,10 @@ ai_agent_ha:
 """
 
 import asyncio
+import codecs
 import json
 import logging
+import re
 import time
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional, Union
@@ -35,6 +37,10 @@ from urllib.parse import quote
 import aiohttp
 import yaml  # type: ignore[import-untyped]
 from homeassistant.core import HomeAssistant
+from homeassistant.helpers import area_registry as ar
+from homeassistant.helpers import device_registry as dr
+from homeassistant.helpers import entity_registry as er
+from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.storage import Store
 from homeassistant.util import dt as dt_util
 
@@ -108,7 +114,49 @@ def sanitize_for_logging(data: Any, mask: str = "***REDACTED***") -> Any:
 
 
 # === AI Client Abstractions ===
+
+class _HASessionContext:
+    """Async context manager that wraps a shared HA aiohttp session.
+
+    The HA-managed session must NOT be closed by individual callers, so this
+    wrapper skips the close step while still exposing the standard
+    ``async with`` interface expected by all call sites.
+    """
+
+    __slots__ = ("_session",)
+
+    def __init__(self, session: aiohttp.ClientSession) -> None:
+        self._session = session
+
+    async def __aenter__(self) -> aiohttp.ClientSession:
+        return self._session
+
+    async def __aexit__(self, *_) -> None:
+        pass  # Do not close — HA owns this session.
+
+
 class BaseAIClient:
+    """Base class for all AI provider clients.
+
+    Subclasses should call super().__init__(hass=hass) if they accept a hass
+    instance, so that _get_session() can return the HA-managed aiohttp session
+    (which avoids creating a new TCP connector per request).
+    """
+
+    def __init__(self, hass: Optional["HomeAssistant"] = None):
+        self._hass = hass
+
+    def _session(self):
+        """Return a context manager that yields an aiohttp ClientSession.
+
+        When a Home Assistant instance is available the HA-managed session is
+        reused (no new connector / TCP stack per request).  When unavailable
+        (e.g. in unit tests) a fresh short-lived session is created instead.
+        """
+        if self._hass is not None:
+            return _HASessionContext(async_get_clientsession(self._hass))
+        return aiohttp.ClientSession()
+
     async def get_response(self, messages, **kwargs):
         raise NotImplementedError
 
@@ -128,7 +176,6 @@ class BaseAIClient:
         Returns:
             The response with all thinking blocks removed and whitespace cleaned up.
         """
-        import re
         if not text:
             return text
         # Remove <think>...</think> blocks (case-insensitive, dotall)
@@ -143,7 +190,8 @@ class BaseAIClient:
 
 
 class LocalClient(BaseAIClient):
-    def __init__(self, url, model=""):
+    def __init__(self, url, model="", hass=None):
+        super().__init__(hass=hass)
         self.url = url
         self.model = model
         # Detect OpenAI-compatible endpoints (e.g. LM Studio, vLLM, LocalAI)
@@ -233,7 +281,7 @@ class LocalClient(BaseAIClient):
                     payload.get("model"),
                 )
 
-        async with aiohttp.ClientSession() as session:
+        async with self._session() as session:
             async with session.post(
                 request_url,
                 headers=headers,
@@ -506,7 +554,8 @@ class LocalClient(BaseAIClient):
 
 
 class LlamaClient(BaseAIClient):
-    def __init__(self, token, model="Llama-4-Maverick-17B-128E-Instruct-FP8"):
+    def __init__(self, token, model="Llama-4-Maverick-17B-128E-Instruct-FP8", hass=None):
+        super().__init__(hass=hass)
         self.token = token
         self.model = model
         self.api_url = "https://api.llama.com/v1/chat/completions"
@@ -527,7 +576,7 @@ class LlamaClient(BaseAIClient):
 
         _LOGGER.debug("Llama request payload: %s", json.dumps(payload, indent=2))
 
-        async with aiohttp.ClientSession() as session:
+        async with self._session() as session:
             async with session.post(
                 self.api_url,
                 headers=headers,
@@ -546,7 +595,8 @@ class LlamaClient(BaseAIClient):
 
 
 class OpenAIClient(BaseAIClient):
-    def __init__(self, token, model="gpt-3.5-turbo", base_url=""):
+    def __init__(self, token, model="gpt-3.5-turbo", base_url="", hass=None):
+        super().__init__(hass=hass)
         self.token = token
         self.model = model
         # Use custom base URL if provided (e.g. LM Studio at http://192.168.0.57:1234/v1)
@@ -602,7 +652,7 @@ class OpenAIClient(BaseAIClient):
 
         _LOGGER.debug("OpenAI request payload: %s", json.dumps(payload, indent=2))
 
-        async with aiohttp.ClientSession() as session:
+        async with self._session() as session:
             async with session.post(
                 self.api_url,
                 headers=headers,
@@ -644,7 +694,8 @@ class OpenAIClient(BaseAIClient):
 
 
 class GeminiClient(BaseAIClient):
-    def __init__(self, token, model="gemini-2.5-flash"):
+    def __init__(self, token, model="gemini-2.5-flash", hass=None):
+        super().__init__(hass=hass)
         self.token = token.strip() if token else token  # Strip whitespace from token
         self.model = model
         # Use v1beta for all models as per Google's current API documentation
@@ -700,7 +751,7 @@ class GeminiClient(BaseAIClient):
 
         _LOGGER.debug("Gemini request payload: %s", json.dumps(payload, indent=2))
 
-        async with aiohttp.ClientSession() as session:
+        async with self._session() as session:
             async with session.post(
                 url_with_key,
                 headers=headers,
@@ -768,7 +819,8 @@ class GeminiClient(BaseAIClient):
 
 
 class AnthropicClient(BaseAIClient):
-    def __init__(self, token, model="claude-sonnet-4-5-20250929"):
+    def __init__(self, token, model="claude-sonnet-4-5-20250929", hass=None):
+        super().__init__(hass=hass)
         self.token = token
         self.model = model
         self.api_url = "https://api.anthropic.com/v1/messages"
@@ -814,7 +866,7 @@ class AnthropicClient(BaseAIClient):
 
         _LOGGER.debug("Anthropic request payload: %s", json.dumps(payload, indent=2))
 
-        async with aiohttp.ClientSession() as session:
+        async with self._session() as session:
             async with session.post(
                 self.api_url,
                 headers=headers,
@@ -837,7 +889,8 @@ class AnthropicClient(BaseAIClient):
 
 
 class OpenRouterClient(BaseAIClient):
-    def __init__(self, token, model="openai/gpt-4o"):
+    def __init__(self, token, model="openai/gpt-4o", hass=None):
+        super().__init__(hass=hass)
         self.token = token
         self.model = model
         self.api_url = "https://openrouter.ai/api/v1/chat/completions"
@@ -860,7 +913,7 @@ class OpenRouterClient(BaseAIClient):
 
         _LOGGER.debug("OpenRouter request payload: %s", json.dumps(payload, indent=2))
 
-        async with aiohttp.ClientSession() as session:
+        async with self._session() as session:
             async with session.post(
                 self.api_url,
                 headers=headers,
@@ -888,7 +941,8 @@ class OpenRouterClient(BaseAIClient):
 
 
 class AlterClient(BaseAIClient):
-    def __init__(self, token, model=""):
+    def __init__(self, token, model="", hass=None):
+        super().__init__(hass=hass)
         self.token = token
         self.model = model
         self.api_url = "https://alterhq.com/api/v1/chat/completions"
@@ -908,7 +962,7 @@ class AlterClient(BaseAIClient):
 
         _LOGGER.debug("Alter request payload: %s", json.dumps(payload, indent=2))
 
-        async with aiohttp.ClientSession() as session:
+        async with self._session() as session:
             async with session.post(
                 self.api_url,
                 headers=headers,
@@ -932,7 +986,8 @@ class AlterClient(BaseAIClient):
 
 
 class ZaiClient(BaseAIClient):
-    def __init__(self, token, model="", endpoint_type="general"):
+    def __init__(self, token, model="", endpoint_type="general", hass=None):
+        super().__init__(hass=hass)
         self.token = token
         self.model = model
         self.endpoint_type = endpoint_type
@@ -962,7 +1017,7 @@ class ZaiClient(BaseAIClient):
 
         _LOGGER.debug("z.ai request payload: %s", json.dumps(payload, indent=2))
 
-        async with aiohttp.ClientSession() as session:
+        async with self._session() as session:
             async with session.post(
                 self.api_url,
                 headers=headers,
@@ -1259,33 +1314,33 @@ class AiAgentHaAgent:
         if provider == "openai":
             model = models_config.get("openai", "gpt-3.5-turbo")
             base_url = config.get("openai_base_url", "") or ""
-            self.ai_client = OpenAIClient(config.get("openai_token"), model, base_url)
+            self.ai_client = OpenAIClient(config.get("openai_token"), model, base_url, hass=self.hass)
         elif provider == "gemini":
             model = models_config.get("gemini", "gemini-2.5-flash")
-            self.ai_client = GeminiClient(config.get("gemini_token"), model)
+            self.ai_client = GeminiClient(config.get("gemini_token"), model, hass=self.hass)
         elif provider == "openrouter":
             model = models_config.get("openrouter", "openai/gpt-4o")
-            self.ai_client = OpenRouterClient(config.get("openrouter_token"), model)
+            self.ai_client = OpenRouterClient(config.get("openrouter_token"), model, hass=self.hass)
         elif provider == "anthropic":
             model = models_config.get("anthropic", "claude-sonnet-4-5-20250929")
-            self.ai_client = AnthropicClient(config.get("anthropic_token"), model)
+            self.ai_client = AnthropicClient(config.get("anthropic_token"), model, hass=self.hass)
         elif provider == "alter":
             model = models_config.get("alter", "")
-            self.ai_client = AlterClient(config.get("alter_token"), model)
+            self.ai_client = AlterClient(config.get("alter_token"), model, hass=self.hass)
         elif provider == "zai":
             model = models_config.get("zai", "glm-4.7")
             endpoint_type = config.get("zai_endpoint", "general")
-            self.ai_client = ZaiClient(config.get("zai_token"), model, endpoint_type)
+            self.ai_client = ZaiClient(config.get("zai_token"), model, endpoint_type, hass=self.hass)
         elif provider == "local":
             model = models_config.get("local", "")
             url = config.get("local_url")
             if not url:
                 _LOGGER.error("Missing local_url for local provider")
                 raise Exception("Missing local_url configuration for local provider")
-            self.ai_client = LocalClient(url, model)
+            self.ai_client = LocalClient(url, model, hass=self.hass)
         else:  # default to llama if somehow specified
             model = models_config.get("llama", "Llama-4-Maverick-17B-128E-Instruct-FP8")
-            self.ai_client = LlamaClient(config.get("llama_token"), model)
+            self.ai_client = LlamaClient(config.get("llama_token"), model, hass=self.hass)
 
         _LOGGER.debug(
             "AiAgentHaAgent initialized successfully with provider: %s, model: %s",
@@ -1386,10 +1441,6 @@ class AiAgentHaAgent:
             area_name = None
 
             try:
-                from homeassistant.helpers import area_registry as ar
-                from homeassistant.helpers import device_registry as dr
-                from homeassistant.helpers import entity_registry as er
-
                 entity_registry = er.async_get(self.hass)
                 device_registry = dr.async_get(self.hass)
                 area_registry = ar.async_get(self.hass)
@@ -1625,9 +1676,6 @@ class AiAgentHaAgent:
             _LOGGER.debug("Requesting all entities for area: %s", area_id)
 
             # Get entity registry to find entities assigned to the area
-            from homeassistant.helpers import device_registry as dr
-            from homeassistant.helpers import entity_registry as er
-
             entity_registry = er.async_get(self.hass)
             device_registry = dr.async_get(self.hass)
 
@@ -1744,10 +1792,6 @@ class AiAgentHaAgent:
         """
         _LOGGER.debug("Requesting all entity registry entries")
         try:
-            from homeassistant.helpers import area_registry as ar
-            from homeassistant.helpers import device_registry as dr
-            from homeassistant.helpers import entity_registry as er
-
             entity_registry = er.async_get(self.hass)
             if not entity_registry:
                 return []
@@ -1807,8 +1851,6 @@ class AiAgentHaAgent:
         """Get device registry entries"""
         _LOGGER.debug("Requesting all device registry entries")
         try:
-            from homeassistant.helpers import device_registry as dr
-
             registry = dr.async_get(self.hass)
             if not registry:
                 return []
@@ -1882,8 +1924,6 @@ class AiAgentHaAgent:
         """Get area registry information"""
         _LOGGER.debug("Get area registry information")
         try:
-            from homeassistant.helpers import area_registry as ar
-
             registry = ar.async_get(self.hass)
             if not registry:
                 return {}
@@ -2779,6 +2819,7 @@ Then restart Home Assistant to see your new dashboard in the sidebar."""
                         token=token,
                         model=provider_settings["model"],
                         endpoint_type=endpoint_type,
+                        hass=self.hass,
                     )
                     _LOGGER.debug(
                         f"Initialized {selected_provider} client with model {provider_settings['model']}, endpoint_type {endpoint_type}"
@@ -2786,7 +2827,7 @@ Then restart Home Assistant to see your new dashboard in the sidebar."""
                 elif selected_provider == "local":
                     # LocalClient takes (url, model)
                     self.ai_client = provider_settings["client_class"](
-                        url=token, model=provider_settings["model"]
+                        url=token, model=provider_settings["model"], hass=self.hass
                     )
                     _LOGGER.debug(
                         f"Initialized {selected_provider} client with model {provider_settings['model']}"
@@ -2797,11 +2838,11 @@ Then restart Home Assistant to see your new dashboard in the sidebar."""
                     if selected_provider == "openai":
                         base_url = config.get("openai_base_url", "") or ""
                         self.ai_client = provider_settings["client_class"](
-                            token=token, model=provider_settings["model"], base_url=base_url
+                            token=token, model=provider_settings["model"], base_url=base_url, hass=self.hass
                         )
                     else:
                         self.ai_client = provider_settings["client_class"](
-                            token=token, model=provider_settings["model"]
+                            token=token, model=provider_settings["model"], hass=self.hass
                         )
                     _LOGGER.debug(
                         f"Initialized {selected_provider} client with model {provider_settings['model']}"
@@ -2865,8 +2906,6 @@ Then restart Home Assistant to see your new dashboard in the sidebar."""
                         response_clean = response.strip()
 
                         # Remove potential BOM and other invisible characters
-                        import codecs
-
                         if response_clean.startswith(codecs.BOM_UTF8.decode("utf-8")):
                             response_clean = response_clean[1:]
 
@@ -3608,17 +3647,17 @@ Then restart Home Assistant to see your new dashboard in the sidebar."""
         }
 
     async def _get_ai_response(self) -> str:
-        """Get response from the selected AI provider with retries and rate limiting."""
-        if not self._check_rate_limit():
-            raise Exception("Rate limit exceeded. Please try again later.")
+        """Get response from the selected AI provider with retries and rate limiting.
+
+        Rate limiting is enforced by the caller (_process_query_inner) before this
+        method is invoked, so we do not call _check_rate_limit() again here.
+        """
         retry_count = 0
         last_error = None
-        # Limit conversation history to last 10 messages to prevent token overflow
-        recent_messages = (
-            self.conversation_history[-10:]
-            if len(self.conversation_history) > 10
-            else self.conversation_history
-        )
+        # Use the full conversation_history — _trim_history() already caps it
+        # at _max_history_len entries, so we don't apply a redundant 10-message
+        # window here that would strip the system prompt or truncate context.
+        recent_messages = self.conversation_history
         # Ensure system prompt is always the first message
         if not recent_messages or recent_messages[0].get("role") != "system":
             recent_messages = [self.system_prompt] + recent_messages
@@ -3666,7 +3705,10 @@ Then restart Home Assistant to see your new dashboard in the sidebar."""
                         )
                     else:
                         retry_count += 1
-                        await asyncio.sleep(self._retry_delay * retry_count)
+                        # Exponential backoff: 1 s, 2 s, 4 s … capped at 30 s
+                        await asyncio.sleep(
+                            min(self._retry_delay * (2 ** (retry_count - 1)), 30)
+                        )
                         continue
 
                 return str(response)
@@ -3677,7 +3719,10 @@ Then restart Home Assistant to see your new dashboard in the sidebar."""
                 last_error = e
                 retry_count += 1
                 if retry_count < self._max_retries:
-                    await asyncio.sleep(self._retry_delay * retry_count)
+                    # Exponential backoff: 1 s, 2 s, 4 s … capped at 30 s
+                    await asyncio.sleep(
+                        min(self._retry_delay * (2 ** (retry_count - 1)), 30)
+                    )
                 continue
         raise Exception(
             f"Failed after {retry_count} retries. Last error: {str(last_error)}"
