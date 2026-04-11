@@ -6,6 +6,33 @@ import {
 
 console.log("AI Agent HA Panel loading..."); // Debug log
 
+// Try to find the actionable JSON object in a potentially multi-JSON response.
+// The model often emits several data objects followed by the final response object.
+// We scan all top-level JSON objects and return the last one with a request_type.
+function extractActionableJson(text) {
+  const objects = [];
+  let depth = 0;
+  let start = -1;
+  for (let i = 0; i < text.length; i++) {
+    if (text[i] === '{') {
+      if (depth === 0) start = i;
+      depth++;
+    } else if (text[i] === '}') {
+      depth--;
+      if (depth === 0 && start !== -1) {
+        try {
+          const obj = JSON.parse(text.slice(start, i + 1));
+          objects.push(obj);
+        } catch (e) { /* skip malformed */ }
+        start = -1;
+      }
+    }
+  }
+  // Prefer last object with a known request_type
+  const actionable = [...objects].reverse().find(o => o.request_type);
+  return actionable || objects[objects.length - 1] || null;
+}
+
 const CHAT_STORAGE_KEY = 'ai_agent_ha_chat_history';
 const CHAT_STORAGE_MAX_MESSAGES = 100;
 
@@ -1210,42 +1237,30 @@ class AiAgentHaPanel extends LitElement {
 
       // Check if the response contains an automation or dashboard suggestion
       try {
-        console.debug("Attempting to parse response as JSON:", event.data.answer);
-        let jsonText = event.data.answer;
-        
-        // Try to extract JSON from mixed text+JSON responses
-        const jsonMatch = jsonText.match(/\{[\s\S]*\}/);
-        if (jsonMatch && jsonMatch[0] !== jsonText.trim()) {
-          console.debug("Found JSON within mixed response, extracting:", jsonMatch[0]);
-          jsonText = jsonMatch[0];
+        console.debug("Attempting to parse response:", event.data.answer?.substring(0, 200));
+        const response = extractActionableJson(event.data.answer || '');
+        console.debug("Extracted actionable JSON:", response);
+
+        if (response) {
+          if (response.request_type === 'automation_suggestion') {
+            console.debug("Found automation suggestion");
+            message.automation = response.automation;
+            message.text = response.message || 'I found an automation that might help you. Would you like me to create it?';
+          } else if (response.request_type === 'dashboard_suggestion') {
+            console.debug("Found dashboard suggestion:", response.dashboard);
+            message.dashboard = response.dashboard;
+            message.text = response.message || 'I created a dashboard configuration for you. Would you like me to create it?';
+          } else if (response.request_type === 'final_response') {
+            message.text = response.response || response.message || event.data.answer;
+          } else if (response.message) {
+            message.text = response.message;
+          } else if (response.response) {
+            message.text = response.response;
+          }
         }
-        
-        const response = JSON.parse(jsonText);
-        console.debug("Parsed JSON response:", response);
-        
-        if (response.request_type === 'automation_suggestion') {
-          console.debug("Found automation suggestion");
-          message.automation = response.automation;
-          message.text = response.message || 'I found an automation that might help you. Would you like me to create it?';
-        } else if (response.request_type === 'dashboard_suggestion') {
-          console.debug("Found dashboard suggestion:", response.dashboard);
-          message.dashboard = response.dashboard;
-          message.text = response.message || 'I created a dashboard configuration for you. Would you like me to create it?';
-        } else if (response.request_type === 'final_response') {
-          // If it's a final response, use the response field
-          message.text = response.response || response.message || event.data.answer;
-        } else if (response.message) {
-          // If there's a message field, use it
-          message.text = response.message;
-        } else if (response.response) {
-          // If there's a response field, use it
-          message.text = response.response;
-        }
-        // If none of the above, keep the original event.data.answer as message.text
+        // If no actionable JSON found, keep original event.data.answer as message.text
       } catch (e) {
-        // Not a JSON response, treat as normal message
-        console.debug("Response is not JSON, using as-is:", event.data.answer);
-        console.debug("JSON parse error:", e);
+        console.debug("Response parsing error:", e);
         // message.text is already set to event.data.answer
       }
 
