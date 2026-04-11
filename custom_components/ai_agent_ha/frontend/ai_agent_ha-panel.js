@@ -551,59 +551,31 @@ class AiAgentHaPanel extends LitElement {
         border: 1px solid var(--divider-color);
       }
       .dashboard-suggestion {
-        background: var(--secondary-background-color);
-        border: 1px solid var(--info-color, #2196f3);
+        margin-top: 12px;
+        padding: 14px 16px;
+        background: var(--card-background-color, rgba(255,255,255,0.05));
+        border: 1px solid var(--divider-color, rgba(255,255,255,0.12));
         border-radius: 12px;
-        padding: 16px;
-        margin: 8px 0;
-        box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
-        position: relative;
-        z-index: 10;
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
       }
       .dashboard-title {
-        font-weight: 500;
-        margin-bottom: 8px;
-        color: var(--info-color, #2196f3);
-        font-size: 16px;
+        font-size: 1rem;
+        font-weight: 600;
+        color: var(--primary-text-color);
+        display: flex;
+        align-items: center;
+        gap: 8px;
       }
       .dashboard-description {
-        margin-bottom: 16px;
-        color: var(--secondary-text-color);
-        line-height: 1.4;
+        font-size: 0.8rem;
+        color: var(--secondary-text-color, rgba(255,255,255,0.5));
       }
       .dashboard-actions {
         display: flex;
         gap: 8px;
-        margin-top: 16px;
-        justify-content: flex-end;
-      }
-      .dashboard-actions ha-button {
-        --mdc-button-height: 40px;
-        --mdc-button-padding: 0 20px;
-        --mdc-typography-button-font-size: 14px;
-        --mdc-typography-button-font-weight: 600;
-        border-radius: 20px;
-      }
-      .dashboard-actions ha-button:first-child {
-        --mdc-theme-primary: var(--info-color, #2196f3);
-        --mdc-theme-on-primary: #fff;
-      }
-      .dashboard-actions ha-button:last-child {
-        --mdc-theme-primary: var(--error-color);
-        --mdc-theme-on-primary: #fff;
-      }
-      .dashboard-details {
-        margin-top: 8px;
-        padding: 8px;
-        background: var(--primary-background-color);
-        border-radius: 8px;
-        font-family: monospace;
-        font-size: 12px;
-        white-space: pre-wrap;
-        overflow-x: auto;
-        max-height: 200px;
-        overflow-y: auto;
-        border: 1px solid var(--divider-color);
+        margin-top: 4px;
       }
       .no-providers {
         color: var(--error-color);
@@ -1028,11 +1000,15 @@ class AiAgentHaPanel extends LitElement {
                 ` : ''}
                 ${msg.dashboard ? html`
                   <div class="dashboard-suggestion">
-                    <div class="dashboard-title">${msg.dashboard.title}</div>
-                    <div class="dashboard-description">Dashboard with ${msg.dashboard.views ? msg.dashboard.views.length : 0} view(s)</div>
-                    <div class="dashboard-details">
-                      ${JSON.stringify(msg.dashboard, null, 2)}
+                    <div class="dashboard-title">
+                      <ha-icon icon="${msg.dashboard.icon || 'mdi:view-dashboard'}"></ha-icon>
+                      ${msg.dashboard.title || 'New Dashboard'}
                     </div>
+                    <div class="dashboard-description">${(() => {
+                      const views = msg.dashboard.views || [];
+                      const totalCards = views.reduce((sum, v) => sum + (v.cards ? v.cards.length : 0), 0);
+                      return `${views.length} view${views.length !== 1 ? 's' : ''} \u00b7 ${totalCards} card${totalCards !== 1 ? 's' : ''}`;
+                    })()}</div>
                     <div class="dashboard-actions">
                       <ha-button
                         @click=${() => this._approveDashboard(msg.dashboard)}
