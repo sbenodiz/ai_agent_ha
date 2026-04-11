@@ -904,6 +904,120 @@ class ZaiClient(BaseAIClient):
                 return str(data)
 
 
+
+class AskSageClient(BaseAIClient):
+    """AI client for the Ask Sage Server API.
+
+    Ask Sage is an AI platform accessible via https://api.asksage.ai/server/.
+    Authentication uses the ``x-access-tokens`` header (not Bearer).
+    The ``/query`` endpoint accepts a ``message`` field that is either a plain
+    string (single-turn) or a list of ``{user, message}`` dicts (multi-turn).
+
+    Government/classified model IDs (containing "gov") are automatically
+    excluded from the live model list fetched via ``/get-models``.
+    """
+
+    QUERY_URL = "https://api.asksage.ai/server/query"
+    MODELS_URL = "https://api.asksage.ai/server/get-models"
+
+    def __init__(self, token, model="gpt-4o-mini"):
+        self.token = token
+        self.model = model
+
+    @staticmethod
+    def _filter_models(raw: list) -> list:
+        """Return model ids from the /get-models response, excluding gov models."""
+        return [
+            m["id"]
+            for m in raw
+            if isinstance(m, dict)
+            and "id" in m
+            and "gov" not in m["id"].lower()
+        ]
+
+    @classmethod
+    async def fetch_models(cls) -> list:
+        """Fetch available (non-gov) model ids from the public /get-models endpoint.
+
+        Returns an empty list on failure so callers can fall back gracefully.
+        """
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(
+                    cls.MODELS_URL,
+                    timeout=aiohttp.ClientTimeout(total=10),
+                ) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        return cls._filter_models(data.get("data", []))
+                    _LOGGER.warning(
+                        "Ask Sage /get-models returned HTTP %d", resp.status
+                    )
+        except Exception as exc:  # noqa: BLE001
+            _LOGGER.warning("Ask Sage model fetch failed: %s", exc)
+        return []
+
+    async def get_response(self, messages, **kwargs) -> str:
+        """Send a query to the Ask Sage /query endpoint and return the response text.
+
+        Converts OpenAI-style message dicts to the Ask Sage format:
+        - System messages are skipped (Ask Sage handles persona separately).
+        - A single user turn is sent as a plain string.
+        - Multiple turns are sent as a list of ``{"user": "me"|"gpt", "message": "…"}``
+          dicts.
+
+        The ``dataset`` field is set to ``"none"`` to disable Ask Sage's own RAG
+        so that the Home Assistant context injected by the agent is used exclusively.
+        """
+        _LOGGER.debug("Making request to Ask Sage API with model: %s", self.model)
+
+        # Convert OpenAI-style messages to Ask Sage format
+        converted = []
+        for msg in messages:
+            role = msg.get("role", "user")
+            content = msg.get("content", "")
+            if role == "system":
+                continue  # Ask Sage handles system context via persona
+            user_tag = "me" if role == "user" else "gpt"
+            converted.append({"user": user_tag, "message": content})
+
+        # Single-turn shortcut: send a plain string instead of a one-element list
+        if len(converted) == 1:
+            message_payload = converted[0]["message"]
+        else:
+            message_payload = converted
+
+        headers = {
+            "x-access-tokens": self.token,
+            "Content-Type": "application/json",
+        }
+        payload = {
+            "message": message_payload,
+            "model": self.model,
+            "temperature": 0,
+            "dataset": "none",
+            "live": 0,
+        }
+
+        async with aiohttp.ClientSession() as session:
+            async with session.post(
+                self.QUERY_URL,
+                headers=headers,
+                json=payload,
+                timeout=aiohttp.ClientTimeout(total=300),
+            ) as resp:
+                if resp.status != 200:
+                    error_text = await resp.text()
+                    _LOGGER.error(
+                        "Ask Sage API error %d: %s", resp.status, error_text
+                    )
+                    raise Exception(f"Ask Sage API error {resp.status}")
+                data = await resp.json()
+                raw_text = data.get("message", str(data))
+                # Strip thinking/reasoning blocks produced by some underlying models
+                return BaseAIClient.strip_thinking_tags(raw_text) if hasattr(BaseAIClient, "strip_thinking_tags") else raw_text
+
+
 # === Main Agent ===
 class AiAgentHaAgent:
     """Agent for handling queries with dynamic data requests and multiple AI providers."""
@@ -1187,6 +1301,9 @@ class AiAgentHaAgent:
             model = models_config.get("zai", "glm-4.7")
             endpoint_type = config.get("zai_endpoint", "general")
             self.ai_client = ZaiClient(config.get("zai_token"), model, endpoint_type)
+        elif provider == "asksage":
+            model = models_config.get("asksage", "gpt-4o-mini")
+            self.ai_client = AskSageClient(config.get("asksage_token"), model)
         elif provider == "local":
             model = models_config.get("local", "")
             url = config.get("local_url")
@@ -1220,6 +1337,8 @@ class AiAgentHaAgent:
             token = self.config.get("alter_token")
         elif provider == "zai":
             token = self.config.get("zai_token")
+        elif provider == "asksage":
+            token = self.config.get("asksage_token")
         elif provider == "local":
             token = self.config.get("local_url")
         else:
@@ -2636,6 +2755,11 @@ Then restart Home Assistant to see your new dashboard in the sidebar."""
                     "token_key": "zai_token",
                     "model": models_config.get("zai", ""),
                     "client_class": ZaiClient,
+                },
+                "asksage": {
+                    "token_key": "asksage_token",
+                    "model": models_config.get("asksage", "gpt-4o-mini"),
+                    "client_class": AskSageClient,
                 },
                 "local": {
                     "token_key": "local_url",
