@@ -112,6 +112,35 @@ class BaseAIClient:
     async def get_response(self, messages, **kwargs):
         raise NotImplementedError
 
+    @staticmethod
+    def strip_thinking_tags(text: str) -> str:
+        """Remove thinking/reasoning blocks from model responses.
+
+        Strips <think>...</think> blocks produced by models with thinking mode
+        enabled (Qwen3, DeepSeek-R1, etc.). Handles multi-line blocks, nested
+        whitespace, and cases where the closing tag is missing (truncated output).
+
+        Also strips the <|thinking|>...</|thinking|> variant used by some models.
+
+        Args:
+            text: Raw response string from the model.
+
+        Returns:
+            The response with all thinking blocks removed and whitespace cleaned up.
+        """
+        import re
+        if not text:
+            return text
+        # Remove <think>...</think> blocks (case-insensitive, dotall)
+        text = re.sub(r'<think>.*?</think>', '', text, flags=re.DOTALL | re.IGNORECASE)
+        # Remove <|thinking|>...</|thinking|> variant
+        text = re.sub(r'<\|thinking\|>.*?</\|thinking\|>', '', text, flags=re.DOTALL | re.IGNORECASE)
+        # Handle truncated blocks: remove everything from an unclosed <think> to end of string
+        text = re.sub(r'<think>.*$', '', text, flags=re.DOTALL | re.IGNORECASE)
+        text = re.sub(r'<\|thinking\|>.*$', '', text, flags=re.DOTALL | re.IGNORECASE)
+        # Clean up leading/trailing whitespace left behind
+        return text.strip()
+
 
 class LocalClient(BaseAIClient):
     def __init__(self, url, model=""):
@@ -251,7 +280,7 @@ class LocalClient(BaseAIClient):
                         # Try common response formats
                         # Ollama format - return only the response text
                         if "response" in data:
-                            response_content = data["response"]
+                            response_content = self.strip_thinking_tags(data["response"])
                             _LOGGER.debug(
                                 "Extracted response content: %s",
                                 (
@@ -334,9 +363,9 @@ class LocalClient(BaseAIClient):
                         elif "choices" in data and len(data["choices"]) > 0:
                             choice = data["choices"][0]
                             if "message" in choice and "content" in choice["message"]:
-                                content = choice["message"]["content"]
+                                content = self.strip_thinking_tags(choice["message"]["content"])
                             elif "text" in choice:
-                                content = choice["text"]
+                                content = self.strip_thinking_tags(choice["text"])
                             else:
                                 content = str(data)
 
@@ -372,7 +401,7 @@ class LocalClient(BaseAIClient):
 
                         # Generic content field
                         elif "content" in data:
-                            content = data["content"]
+                            content = self.strip_thinking_tags(data["content"])
                             content = content.strip()
                             if content.startswith("{") and content.endswith("}"):
                                 try:
@@ -429,9 +458,9 @@ class LocalClient(BaseAIClient):
                                 isinstance(message_content, dict)
                                 and "content" in message_content
                             ):
-                                content = message_content["content"]
+                                content = self.strip_thinking_tags(message_content["content"])
                             else:
-                                content = str(message_content)
+                                content = self.strip_thinking_tags(str(message_content))
                             return json.dumps(
                                 {"request_type": "final_response", "response": content}
                             )
@@ -513,7 +542,7 @@ class LlamaClient(BaseAIClient):
                 # Extract text from Llama response
                 completion = data.get("completion_message", {})
                 content = completion.get("content", {})
-                return content.get("text", str(data))
+                return self.strip_thinking_tags(content.get("text", str(data)))
 
 
 class OpenAIClient(BaseAIClient):
@@ -605,7 +634,7 @@ class OpenAIClient(BaseAIClient):
                         _LOGGER.debug(
                             "Full OpenAI response: %s", json.dumps(data, indent=2)
                         )
-                    return content
+                    return self.strip_thinking_tags(content)
                 else:
                     _LOGGER.warning("OpenAI response missing expected structure")
                     _LOGGER.debug(
@@ -720,7 +749,7 @@ class GeminiClient(BaseAIClient):
                             _LOGGER.debug(
                                 "Full Gemini response: %s", json.dumps(data, indent=2)
                             )
-                        return content
+                        return self.strip_thinking_tags(content)
                     else:
                         _LOGGER.warning("Gemini response missing parts")
                         _LOGGER.debug(
@@ -795,7 +824,7 @@ class AnthropicClient(BaseAIClient):
                     # Get the text from the first content block
                     for block in content_blocks:
                         if block.get("type") == "text":
-                            return block.get("text", str(data))
+                            return self.strip_thinking_tags(block.get("text", str(data)))
                 return str(data)
 
 
@@ -846,7 +875,7 @@ class OpenRouterClient(BaseAIClient):
                     )
                     return str(data)
                 if choices and "message" in choices[0]:
-                    return choices[0]["message"].get("content", str(data))
+                    return self.strip_thinking_tags(choices[0]["message"].get("content", str(data)))
                 return str(data)
 
 
@@ -890,7 +919,7 @@ class AlterClient(BaseAIClient):
                     _LOGGER.debug("Full Alter response: %s", json.dumps(data, indent=2))
                     return str(data)
                 if choices and "message" in choices[0]:
-                    return choices[0]["message"].get("content", str(data))
+                    return self.strip_thinking_tags(choices[0]["message"].get("content", str(data)))
                 return str(data)
 
 
@@ -944,7 +973,7 @@ class ZaiClient(BaseAIClient):
                     _LOGGER.debug("Full z.ai response: %s", json.dumps(data, indent=2))
                     return str(data)
                 if choices and "message" in choices[0]:
-                    return choices[0]["message"].get("content", str(data))
+                    return self.strip_thinking_tags(choices[0]["message"].get("content", str(data)))
                 return str(data)
 
 
