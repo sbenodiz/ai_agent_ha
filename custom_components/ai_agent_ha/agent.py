@@ -115,8 +115,10 @@ class BaseAIClient:
 
 class LocalClient(BaseAIClient):
     def __init__(self, url, model=""):
-        self.url = url
+        self.url = url.rstrip("/")
         self.model = model
+        # Auto-detect OpenAI-compatible servers (LM Studio, vLLM, etc.) by /v1 in URL
+        self._openai_compat = "/v1" in self.url
 
     async def get_response(self, messages, **kwargs):
         _LOGGER.debug(
@@ -131,51 +133,59 @@ class LocalClient(BaseAIClient):
             )
         headers = {"Content-Type": "application/json"}
 
-        # Format user prompt from messages
-        prompt = ""
-        for message in messages:
-            role = message.get("role", "")
-            content = message.get("content", "")
-
-            # Simple formatting: prefixing each message with its role
-            if role == "system":
-                prompt += f"System: {content}\n\n"
-            elif role == "user":
-                prompt += f"User: {content}\n\n"
-            elif role == "assistant":
-                prompt += f"Assistant: {content}\n\n"
-
-        # Add final prompt prefix for the assistant's response
-        prompt += "Assistant: "
-
-        # Build a generic payload that works with most local API servers
-        payload = {
-            "prompt": prompt,
-            "stream": False,  # Disable streaming to get a single complete response
-            # max_tokens omitted - let local model use its default capacity
-        }
-
-        # Add model if specified
-        if self.model:
-            payload["model"] = self.model
-
-        # Note: Payloads don't contain auth tokens (those are in headers), but may contain user prompts
-        _LOGGER.debug("Local API request payload: %s", json.dumps(payload, indent=2))
-
-        # Ollama-specific validation
-        if "model" not in payload or not payload["model"]:
-            _LOGGER.warning(
-                "Missing 'model' field in request to local API. This may cause issues with Ollama."
-            )
-        elif self.url and "ollama" in self.url.lower():
+        if self._openai_compat:
+            # OpenAI-compatible mode: LM Studio, vLLM, and similar servers
+            # Use POST /v1/chat/completions with messages array
+            endpoint = self.url if self.url.endswith("/chat/completions") else self.url + "/chat/completions"
+            payload = {
+                "messages": messages,
+                "stream": False,
+            }
+            if self.model:
+                payload["model"] = self.model
             _LOGGER.debug(
-                "Detected Ollama URL, ensuring model is specified: %s",
-                payload.get("model"),
+                "OpenAI-compat mode — POST %s with model: %s",
+                endpoint,
+                self.model or "[none]",
             )
+            _LOGGER.debug("Local API request payload: %s", json.dumps(payload, indent=2))
+        else:
+            # Ollama-native mode: POST /api/generate with flat prompt string
+            endpoint = self.url
+            prompt = ""
+            for message in messages:
+                role = message.get("role", "")
+                content = message.get("content", "")
+                if role == "system":
+                    prompt += f"System: {content}\n\n"
+                elif role == "user":
+                    prompt += f"User: {content}\n\n"
+                elif role == "assistant":
+                    prompt += f"Assistant: {content}\n\n"
+            prompt += "Assistant: "
+
+            payload = {
+                "prompt": prompt,
+                "stream": False,
+            }
+            if self.model:
+                payload["model"] = self.model
+
+            _LOGGER.debug("Local API request payload: %s", json.dumps(payload, indent=2))
+
+            if "model" not in payload or not payload["model"]:
+                _LOGGER.warning(
+                    "Missing 'model' field in request to local API. This may cause issues with Ollama."
+                )
+            elif self.url and "ollama" in self.url.lower():
+                _LOGGER.debug(
+                    "Detected Ollama URL, ensuring model is specified: %s",
+                    payload.get("model"),
+                )
 
         async with aiohttp.ClientSession() as session:
             async with session.post(
-                self.url,
+                endpoint,
                 headers=headers,
                 json=payload,
                 timeout=aiohttp.ClientTimeout(total=300),
