@@ -1152,6 +1152,7 @@ class AiAgentHaAgent:
         self._last_request_time = 0
         self._request_count = 0
         self._request_window_start = time.time()
+        self._max_history_len = 50  # Max conversation_history entries (system prompt + 49 turns)
 
         provider = config.get("ai_provider", "openai")
         models_config = config.get("models", {})
@@ -1234,6 +1235,19 @@ class AiAgentHaAgent:
 
         # Add more specific validation based on your API key format
         return len(token) >= 32
+
+    def _trim_history(self) -> None:
+        """Trim conversation_history to the last _max_history_len entries.
+
+        Preserves the system prompt at position 0 when trimming, so the
+        model always has the instruction context available.
+        """
+        if len(self.conversation_history) > self._max_history_len:
+            tail_size = self._max_history_len - 1
+            self.conversation_history = (
+                [self.conversation_history[0]]
+                + self.conversation_history[-tail_size:]
+            )
 
     def _check_rate_limit(self) -> bool:
         """Check if we're within rate limits."""
@@ -3039,6 +3053,7 @@ Then restart Home Assistant to see your new dashboard in the sidebar."""
                             }
                             result = _with_debug(result)
                             self._set_cached_data(cache_key, result)
+                            self._trim_history()
                             return result
                         elif (
                             response_data.get("request_type") == "automation_suggestion"
@@ -3064,6 +3079,7 @@ Then restart Home Assistant to see your new dashboard in the sidebar."""
                             }
                             result = _with_debug(result)
                             self._set_cached_data(cache_key, result)
+                            self._trim_history()
                             return result
                         elif (
                             response_data.get("request_type") == "dashboard_suggestion"
@@ -3089,6 +3105,7 @@ Then restart Home Assistant to see your new dashboard in the sidebar."""
                             }
                             result = _with_debug(result)
                             self._set_cached_data(cache_key, result)
+                            self._trim_history()
                             return result
                         elif response_data.get("request_type") in [
                             "get_entities",
@@ -3424,6 +3441,7 @@ Then restart Home Assistant to see your new dashboard in the sidebar."""
 
                         result = _with_debug(result)
                         self._set_cached_data(cache_key, result)
+                        self._trim_history()
                         return result
 
                 except Exception as e:
