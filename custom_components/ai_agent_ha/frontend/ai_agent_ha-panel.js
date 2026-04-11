@@ -6,6 +6,9 @@ import {
 
 console.log("AI Agent HA Panel loading..."); // Debug log
 
+const CHAT_STORAGE_KEY = 'ai_agent_ha_chat_history';
+const CHAT_STORAGE_MAX_MESSAGES = 100;
+
 const PROVIDERS = {
   openai: "OpenAI",
   llama: "Llama",
@@ -613,7 +616,7 @@ class AiAgentHaPanel extends LitElement {
 
   constructor() {
     super();
-    this._messages = [];
+    this._messages = this._loadMessages();
     this._isLoading = false;
     this._error = null;
     this._pendingAutomation = null;
@@ -647,6 +650,32 @@ class AiAgentHaPanel extends LitElement {
     console.debug("AI Agent HA Panel constructor called");
   }
 
+  _loadMessages() {
+    try {
+      const raw = localStorage.getItem(CHAT_STORAGE_KEY);
+      if (!raw) return [];
+      const parsed = JSON.parse(raw);
+      if (!Array.isArray(parsed)) return [];
+      console.debug('AI Agent HA: restored', parsed.length, 'messages from localStorage');
+      return parsed;
+    } catch (e) {
+      console.warn('AI Agent HA: failed to load chat history from localStorage:', e);
+      return [];
+    }
+  }
+
+  _saveMessages() {
+    try {
+      // Cap at MAX_MESSAGES to avoid localStorage quota issues
+      const toSave = this._messages.length > CHAT_STORAGE_MAX_MESSAGES
+        ? this._messages.slice(-CHAT_STORAGE_MAX_MESSAGES)
+        : this._messages;
+      localStorage.setItem(CHAT_STORAGE_KEY, JSON.stringify(toSave));
+    } catch (e) {
+      console.warn('AI Agent HA: failed to save chat history to localStorage:', e);
+    }
+  }
+
   _getRandomPrompts() {
     // Shuffle array and take first 3 items
     const shuffled = [...this._predefinedPrompts].sort(() => 0.5 - Math.random());
@@ -677,6 +706,11 @@ class AiAgentHaPanel extends LitElement {
 
   async updated(changedProps) {
     console.debug("Updated called with:", changedProps);
+
+    // Persist chat history whenever messages change
+    if (changedProps.has('_messages')) {
+      this._saveMessages();
+    }
 
     // Set up event subscription when hass becomes available
     if (changedProps.has('hass') && this.hass && !this._eventSubscriptionSetup) {
@@ -1372,6 +1406,13 @@ class AiAgentHaPanel extends LitElement {
     this._error = null;
     this._pendingAutomation = null;
     this._debugInfo = null;
+    // Clear persisted chat history
+    try {
+      localStorage.removeItem(CHAT_STORAGE_KEY);
+      console.debug('AI Agent HA: cleared chat history from localStorage');
+    } catch (e) {
+      console.warn('AI Agent HA: failed to clear chat history from localStorage:', e);
+    }
     // Don't clear prompt history - users might want to keep it
   }
 
@@ -1483,3 +1524,4 @@ class AiAgentHaPanel extends LitElement {
 customElements.define("ai_agent_ha-panel", AiAgentHaPanel);
 
 console.log("AI Agent HA Panel registered");
+
