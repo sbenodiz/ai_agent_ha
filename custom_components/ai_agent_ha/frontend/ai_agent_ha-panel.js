@@ -109,7 +109,9 @@ class AiAgentHaPanel extends LitElement {
       _existingDashboards: { type: Array, reflect: false, attribute: false },
       _dashboardPickerLoading: { type: Boolean, reflect: false, attribute: false },
       _activeSuggestionDashboard: { type: Object, reflect: false, attribute: false },
-      _persistenceEnabled: { type: Boolean, reflect: false, attribute: false }
+      _persistenceEnabled: { type: Boolean, reflect: false, attribute: false },
+      _isStreaming: { type: Boolean, reflect: false, attribute: false },
+      _streamingText: { type: String, reflect: false, attribute: false }
     };
   }
 
@@ -471,6 +473,61 @@ class AiAgentHaPanel extends LitElement {
         color: var(--secondary-text-color);
         font-size: 12px;
       }
+      .thinking-block {
+        margin-bottom: 8px;
+        border: 1px solid var(--divider-color, #e0e0e0);
+        border-radius: 8px;
+        overflow: hidden;
+      }
+      .thinking-summary {
+        padding: 8px 12px;
+        cursor: pointer;
+        font-size: 13px;
+        color: var(--secondary-text-color, #666);
+        background: var(--card-background-color, #fafafa);
+        list-style: none;
+        display: flex;
+        align-items: center;
+        gap: 6px;
+      }
+      .thinking-summary::-webkit-details-marker {
+        display: none;
+      }
+      .thinking-summary:hover {
+        background: var(--primary-background-color, #f0f0f0);
+      }
+      .thinking-content-inner {
+        padding: 8px 12px;
+        font-size: 13px;
+        color: var(--secondary-text-color, #666);
+        white-space: pre-wrap;
+        max-height: 300px;
+        overflow-y: auto;
+      }
+      .thinking-pulse-dot {
+        display: inline-block;
+        width: 8px;
+        height: 8px;
+        border-radius: 50%;
+        background: var(--primary-color, #03a9f4);
+        animation: thinkingPulse 1.5s ease-in-out infinite;
+        margin-right: 6px;
+      }
+      @keyframes thinkingPulse {
+        0%, 100% { opacity: 0.3; transform: scale(0.8); }
+        50% { opacity: 1; transform: scale(1.2); }
+      }
+      .thinking-active {
+        padding: 8px 12px;
+        font-size: 13px;
+        color: var(--secondary-text-color, #666);
+        display: flex;
+        align-items: center;
+      }
+      .streaming-text {
+        white-space: pre-wrap;
+        word-wrap: break-word;
+      }
       .send-button {
         --mdc-theme-primary: var(--primary-color);
         --mdc-theme-on-primary: var(--text-primary-color);
@@ -704,6 +761,10 @@ class AiAgentHaPanel extends LitElement {
     this._dashboardPickerLoading = false;
     this._activeSuggestionDashboard = null;
     this._persistenceEnabled = false;
+    this._isStreaming = false;
+    this._streamingText = '';
+    this._streamChunkUnsub = null;
+    this._streamEndUnsub = null;
     console.debug("AI Agent HA Panel constructor called");
   }
 
@@ -804,6 +865,18 @@ class AiAgentHaPanel extends LitElement {
         'ai_agent_ha_response'
       );
       console.debug("Event subscription set up in connectedCallback()");
+
+      // Subscribe to streaming events
+      this._streamChunkUnsub = this.hass.connection.subscribeEvents(
+        (event) => this._handleStreamChunk(event),
+        'ai_agent_ha/stream_chunk'
+      );
+      this._streamEndUnsub = this.hass.connection.subscribeEvents(
+        (event) => this._handleStreamEnd(event),
+        'ai_agent_ha/stream_end'
+      );
+      console.debug("Streaming event subscriptions set up");
+
       // Load prompt history from Home Assistant storage
       await this._loadPromptHistory();
     }
@@ -830,6 +903,13 @@ class AiAgentHaPanel extends LitElement {
     super.disconnectedCallback();
     if (this._logoutHandler) {
       window.removeEventListener('hass-logout', this._logoutHandler);
+    }
+    // Clean up streaming subscriptions
+    if (this._streamChunkUnsub) {
+      try { this._streamChunkUnsub.then(unsub => unsub()); } catch (_) {}
+    }
+    if (this._streamEndUnsub) {
+      try { this._streamEndUnsub.then(unsub => unsub()); } catch (_) {}
     }
   }
 
@@ -1148,6 +1228,15 @@ class AiAgentHaPanel extends LitElement {
           <div class="messages" id="messages">
             ${this._messages.map(msg => html`
               <div class="message ${msg.type}-message">
+                ${msg.thinking ? html`
+                  <details class="thinking-block">
+                    <summary class="thinking-summary">
+                      <span>💭</span>
+                      Thought for ${msg.thinking_duration || '?'}s
+                    </summary>
+                    <div class="thinking-content-inner">${msg.thinking}</div>
+                  </details>
+                ` : ''}
                 ${msg.text}
                 ${this._renderTempChart(msg.chartData)}
                 ${msg.automation ? html`
@@ -1226,14 +1315,29 @@ class AiAgentHaPanel extends LitElement {
                 ` : ''}
               </div>
             `)}
+            ${this._isStreaming && this._streamingText ? html`
+              <div class="message assistant-message">
+                <div class="streaming-text">${this._streamingText}</div>
+              </div>
+            ` : ''}
             ${this._isLoading ? html`
               <div class="loading">
-                <span>AI Agent is thinking</span>
-                <div class="loading-dots">
-                  <div class="dot"></div>
-                  <div class="dot"></div>
-                  <div class="dot"></div>
-                </div>
+                ${this._isStreaming ? html`
+                  <div class="thinking-active">
+                    <span class="thinking-pulse-dot"></span>
+                    Receiving...
+                  </div>
+                ` : html`
+                  <div class="thinking-active">
+                    <span class="thinking-pulse-dot"></span>
+                    Thinking...
+                  </div>
+                  <div class="loading-dots">
+                    <div class="dot"></div>
+                    <div class="dot"></div>
+                    <div class="dot"></div>
+                  </div>
+                `}
               </div>
             ` : ''}
             ${this._error ? html`
@@ -1393,11 +1497,29 @@ class AiAgentHaPanel extends LitElement {
     }
   }
 
+  _handleStreamChunk(event) {
+    const text = event.data?.text || '';
+    if (!text) return;
+    this._isStreaming = true;
+    this._streamingText = text;
+    this.requestUpdate();
+    this._scrollToBottom();
+  }
+
+  _handleStreamEnd(event) {
+    // Stream ended — the final response will arrive via ai_agent_ha_response
+    this._isStreaming = false;
+    console.debug("Stream ended");
+    this.requestUpdate();
+  }
+
   _handleLlamaResponse(event) {
     console.debug("Received llama response:", event);
     
     try {
       this._clearLoadingState();
+      this._isStreaming = false;
+      this._streamingText = '';
       this._debugInfo = this._showThinking ? (event.data.debug || null) : null;
       if (this._showThinking && this._debugInfo) {
         this._thinkingExpanded = true;
@@ -1414,6 +1536,12 @@ class AiAgentHaPanel extends LitElement {
       }
 
       let message = { type: 'assistant', text: event.data.answer };
+
+      // Capture thinking content from response
+      if (event.data.thinking) {
+        message.thinking = event.data.thinking;
+        message.thinking_duration = event.data.thinking_duration || null;
+      }
 
       // Check if the response contains an automation or dashboard suggestion
       try {
@@ -1629,7 +1757,9 @@ class AiAgentHaPanel extends LitElement {
            changedProps.has('_dashboardPickerActive') ||
            changedProps.has('_existingDashboards') ||
            changedProps.has('_dashboardPickerLoading') ||
-           changedProps.has('_persistenceEnabled');
+           changedProps.has('_persistenceEnabled') ||
+           changedProps.has('_isStreaming') ||
+           changedProps.has('_streamingText');
   }
 
   _clearChat() {
@@ -1638,6 +1768,8 @@ class AiAgentHaPanel extends LitElement {
     this._error = null;
     this._pendingAutomation = null;
     this._debugInfo = null;
+    this._isStreaming = false;
+    this._streamingText = '';
     // Clear persisted chat history (both legacy and new)
     try {
       localStorage.removeItem(CHAT_STORAGE_KEY);
