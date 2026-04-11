@@ -325,10 +325,10 @@ class LocalClient(BaseAIClient):
                             )
                     elif resp.status == 400:
                         raise Exception(
-                            f"Bad request to local API. Error: {error_text}"
+                            "Bad request to local API. Check Home Assistant logs for details."
                         )
                     else:
-                        raise Exception(f"Local API error {resp.status}: {error_text}")
+                        raise Exception(f"Local API error (status {resp.status}). Check Home Assistant logs for details.")
 
                 try:
                     response_text = await resp.text()
@@ -577,7 +577,7 @@ class LocalClient(BaseAIClient):
 
                 except Exception as e:
                     _LOGGER.error("Failed to parse local API response: %s", str(e))
-                    raise Exception(f"Failed to parse local API response: {str(e)}")
+                    raise Exception("Failed to parse local API response")
 
     async def get_response_stream(self, messages, **kwargs):
         """SSE streaming for OpenAI-compatible local endpoints.
@@ -756,15 +756,13 @@ class OpenAIClient(BaseAIClient):
 
                 if resp.status != 200:
                     _LOGGER.error("OpenAI API error %d: %s", resp.status, response_text)
-                    raise Exception(f"OpenAI API error {resp.status}: {response_text}")
+                    raise Exception(f"AI provider request failed (status {resp.status})")
 
                 try:
                     data = json.loads(response_text)
                 except json.JSONDecodeError as e:
                     _LOGGER.error("Failed to parse OpenAI response as JSON: %s", str(e))
-                    raise Exception(
-                        f"Invalid JSON response from OpenAI: {response_text[:200]}"
-                    )
+                    raise Exception("Invalid JSON response from AI provider")
 
                 # Extract text from OpenAI response
                 choices = data.get("choices", [])
@@ -855,15 +853,13 @@ class GeminiClient(BaseAIClient):
 
                 if resp.status != 200:
                     _LOGGER.error("Gemini API error %d: %s", resp.status, response_text)
-                    raise Exception(f"Gemini API error {resp.status}: {response_text}")
+                    raise Exception(f"AI provider request failed (status {resp.status})")
 
                 try:
                     data = json.loads(response_text)
                 except json.JSONDecodeError as e:
                     _LOGGER.error("Failed to parse Gemini response as JSON: %s", str(e))
-                    raise Exception(
-                        f"Invalid JSON response from Gemini: {response_text[:200]}"
-                    )
+                    raise Exception("Invalid JSON response from AI provider")
 
                 # Log token usage for debugging, especially for Gemini 2.5 extended thinking
                 usage_metadata = data.get("usageMetadata", {})
@@ -2122,7 +2118,7 @@ class AiAgentHaAgent:
             return result
         except Exception as e:
             _LOGGER.exception("Error getting entity state: %s", str(e))
-            return {"error": f"Error getting entity state: {str(e)}"}
+            return {"error": "Error getting entity state. Check Home Assistant logs for details."}
 
     async def get_entities_by_domain(self, domain: str) -> List[Dict[str, Any]]:
         """Get all entities for a specific domain."""
@@ -2137,7 +2133,7 @@ class AiAgentHaAgent:
             return [await self.get_entity_state(state.entity_id) for state in states]
         except Exception as e:
             _LOGGER.exception("Error getting entities by domain: %s", str(e))
-            return [{"error": f"Error getting entities for domain {domain}: {str(e)}"}]
+            return [{"error": "Error getting entities. Check Home Assistant logs for details."}]
 
     async def get_entities_by_device_class(
         self, device_class: str, domain: str = None
@@ -2185,7 +2181,7 @@ class AiAgentHaAgent:
             _LOGGER.exception("Error getting entities by device_class: %s", str(e))
             return [
                 {
-                    "error": f"Error getting entities with device_class {device_class}: {str(e)}"
+                    "error": "Error getting entities. Check Home Assistant logs for details."
                 }
             ]
 
@@ -2236,7 +2232,7 @@ class AiAgentHaAgent:
 
         except Exception as e:
             _LOGGER.exception("Error getting climate-related entities: %s", str(e))
-            return [{"error": f"Error getting climate-related entities: {str(e)}"}]
+            return [{"error": "Error getting entities. Check Home Assistant logs for details."}]
 
     async def get_entities_by_area(self, area_id: str) -> List[Dict[str, Any]]:
         """Get all entities for a specific area."""
@@ -2275,7 +2271,7 @@ class AiAgentHaAgent:
 
         except Exception as e:
             _LOGGER.exception("Error getting entities by area: %s", str(e))
-            return [{"error": f"Error getting entities for area {area_id}: {str(e)}"}]
+            return [{"error": "Error getting entities. Check Home Assistant logs for details."}]
 
     async def get_entities(self, area_id=None, area_ids=None) -> List[Dict[str, Any]]:
         """Get entities by area(s) - flexible method that supports single area or multiple areas."""
@@ -2325,7 +2321,7 @@ class AiAgentHaAgent:
 
         except Exception as e:
             _LOGGER.exception("Error getting entities: %s", str(e))
-            return [{"error": f"Error getting entities: {str(e)}"}]
+            return [{"error": "Error getting entities. Check Home Assistant logs for details."}]
 
     async def get_calendar_events(
         self, entity_id: Optional[str] = None
@@ -2342,7 +2338,7 @@ class AiAgentHaAgent:
             return await self.get_entities_by_domain("calendar")
         except Exception as e:
             _LOGGER.exception("Error getting calendar events: %s", str(e))
-            return [{"error": f"Error getting calendar events: {str(e)}"}]
+            return [{"error": "Error getting calendar events. Check Home Assistant logs for details."}]
 
     async def get_automations(self) -> List[Dict[str, Any]]:
         """Get all automations."""
@@ -2351,7 +2347,7 @@ class AiAgentHaAgent:
             return await self.get_entities_by_domain("automation")
         except Exception as e:
             _LOGGER.exception("Error getting automations: %s", str(e))
-            return [{"error": f"Error getting automations: {str(e)}"}]
+            return [{"error": "Error getting automations. Check Home Assistant logs for details."}]
 
     async def get_entity_registry(self) -> List[Dict]:
         """Get entity registry entries with device_class and other metadata.
@@ -2413,7 +2409,7 @@ class AiAgentHaAgent:
             return result
         except Exception as e:
             _LOGGER.exception("Error getting entity registry entries: %s", str(e))
-            return [{"error": f"Error getting entity registry entries: {str(e)}"}]
+            return [{"error": "Error getting entity registry. Check Home Assistant logs for details."}]
 
     async def get_device_registry(self) -> List[Dict]:
         """Get device registry entries"""
@@ -2447,7 +2443,7 @@ class AiAgentHaAgent:
             ]
         except Exception as e:
             _LOGGER.exception("Error getting device registry entries: %s", str(e))
-            return [{"error": f"Error getting device registry entries: {str(e)}"}]
+            return [{"error": "Error getting device registry. Check Home Assistant logs for details."}]
 
     async def get_history(self, entity_id: str, hours: int = 24) -> List[Dict]:
         """Get historical state changes for an entity"""
@@ -2486,7 +2482,7 @@ class AiAgentHaAgent:
             return result
         except Exception as e:
             _LOGGER.exception("Error getting history: %s", str(e))
-            return [{"error": f"Error getting history: {str(e)}"}]
+            return [{"error": "Error getting history. Check Home Assistant logs for details."}]
 
     async def get_area_registry(self) -> Dict[str, Any]:
         """Get area registry information"""
@@ -2509,7 +2505,7 @@ class AiAgentHaAgent:
             return result
         except Exception as e:
             _LOGGER.exception("Error getting area registry: %s", str(e))
-            return {"error": f"Error getting area registry: {str(e)}"}
+            return {"error": "Error getting area registry. Check Home Assistant logs for details."}
 
     async def get_person_data(self) -> List[Dict]:
         """Get person tracking information"""
@@ -2536,7 +2532,7 @@ class AiAgentHaAgent:
             return result
         except Exception as e:
             _LOGGER.exception("Error getting person tracking information: %s", str(e))
-            return [{"error": f"Error getting person tracking information: {str(e)}"}]
+            return [{"error": "Error getting person data. Check Home Assistant logs for details."}]
 
     async def get_statistics(self, entity_id: str) -> Dict:
         """Get statistics for an entity"""
@@ -2578,7 +2574,7 @@ class AiAgentHaAgent:
                 return {"error": f"No statistics available for entity {entity_id}"}
         except Exception as e:
             _LOGGER.exception("Error getting statistics: %s", str(e))
-            return {"error": f"Error getting statistics: {str(e)}"}
+            return {"error": "Error getting statistics. Check Home Assistant logs for details."}
 
     async def get_scenes(self) -> List[Dict]:
         """Get scene configurations"""
@@ -2602,7 +2598,7 @@ class AiAgentHaAgent:
             return result
         except Exception as e:
             _LOGGER.exception("Error getting scene configurations: %s", str(e))
-            return [{"error": f"Error getting scene configurations: {str(e)}"}]
+            return [{"error": "Error getting scenes. Check Home Assistant logs for details."}]
 
     async def get_weather_data(self) -> Dict[str, Any]:
         """Get weather data from any available weather entity in the system."""
@@ -2672,7 +2668,7 @@ class AiAgentHaAgent:
             return {"current": current, "forecast": processed_forecast}
         except Exception as e:
             _LOGGER.exception("Error getting weather data: %s", str(e))
-            return {"error": f"Error getting weather data: {str(e)}"}
+            return {"error": "Error retrieving weather data. Check Home Assistant logs for details."}
 
     async def create_automation(
         self, automation_config: Dict[str, Any]
@@ -2749,7 +2745,7 @@ class AiAgentHaAgent:
 
         except Exception as e:
             _LOGGER.exception("Error creating automation: %s", str(e))
-            return {"error": f"Error creating automation: {str(e)}"}
+            return {"error": "Error creating automation. Check Home Assistant logs for details."}
 
     async def get_dashboards(self) -> List[Dict[str, Any]]:
         """Get list of all dashboards."""
@@ -2822,11 +2818,11 @@ class AiAgentHaAgent:
 
             except Exception as e:
                 _LOGGER.warning("Could not get dashboards via lovelace: %s", str(e))
-                return [{"error": f"Could not retrieve dashboards: {str(e)}"}]
+                return [{"error": "Could not retrieve dashboards. Check Home Assistant logs for details."}]
 
         except Exception as e:
             _LOGGER.exception("Error getting dashboards: %s", str(e))
-            return [{"error": f"Error getting dashboards: {str(e)}"}]
+            return [{"error": "Error getting dashboards. Check Home Assistant logs for details."}]
 
     async def get_dashboard_config(
         self, dashboard_url: Optional[str] = None
@@ -2868,11 +2864,11 @@ class AiAgentHaAgent:
 
             except Exception as e:
                 _LOGGER.warning("Could not get dashboard config: %s", str(e))
-                return {"error": f"Could not retrieve dashboard config: {str(e)}"}
+                return {"error": "Could not retrieve dashboard config. Check Home Assistant logs for details."}
 
         except Exception as e:
             _LOGGER.exception("Error getting dashboard config: %s", str(e))
-            return {"error": f"Error getting dashboard config: {str(e)}"}
+            return {"error": "Error getting dashboard config. Check Home Assistant logs for details."}
 
     async def create_dashboard(
         self, dashboard_config: Dict[str, Any]
@@ -3193,11 +3189,11 @@ Then restart Home Assistant to see your new dashboard in the sidebar."""
 
             except Exception as e:
                 _LOGGER.error("Failed to create dashboard file: %s", str(e))
-                return {"error": f"Failed to create dashboard file: {str(e)}"}
+                return {"error": "Failed to create dashboard file. Check Home Assistant logs for details."}
 
         except Exception as e:
             _LOGGER.exception("Error creating dashboard: %s", str(e))
-            return {"error": f"Error creating dashboard: {str(e)}"}
+            return {"error": "Error creating dashboard. Check Home Assistant logs for details."}
 
     async def update_dashboard(
         self, dashboard_url: str, dashboard_config: Dict[str, Any]
@@ -3269,11 +3265,11 @@ Then restart Home Assistant to see your new dashboard in the sidebar."""
 
             except Exception as e:
                 _LOGGER.error("Failed to update dashboard file: %s", str(e))
-                return {"error": f"Failed to update dashboard file: {str(e)}"}
+                return {"error": "Failed to update dashboard file. Check Home Assistant logs for details."}
 
         except Exception as e:
             _LOGGER.exception("Error updating dashboard: %s", str(e))
-            return {"error": f"Error updating dashboard: {str(e)}"}
+            return {"error": "Dashboard update failed. Check Home Assistant logs for details."}
 
     async def process_query(
         self, user_query: str, provider: Optional[str] = None, debug: bool = False
@@ -3454,9 +3450,8 @@ Then restart Home Assistant to see your new dashboard in the sidebar."""
                         f"Initialized {selected_provider} client with model {provider_settings['model']}"
                     )
             except Exception as e:
-                error_msg = f"Error initializing {selected_provider} client: {str(e)}"
-                _LOGGER.error(error_msg)
-                return _with_debug({"success": False, "error": error_msg})
+                _LOGGER.error("Error initializing %s client: %s", selected_provider, str(e))
+                return _with_debug({"success": False, "error": "Error initializing AI provider. Check Home Assistant logs for details."})
 
             # Process the query with rate limiting and retries
             if not self._check_rate_limit():
@@ -4354,7 +4349,7 @@ Then restart Home Assistant to see your new dashboard in the sidebar."""
                             )
                             result = {
                                 "success": False,
-                                "error": f"Invalid response format: {str(e)}",
+                                "error": "Invalid response format. Check Home Assistant logs for details.",
                             }
 
                         result = _with_debug(result)
@@ -4384,7 +4379,7 @@ Then restart Home Assistant to see your new dashboard in the sidebar."""
                     return _with_debug(
                         {
                             "success": False,
-                            "error": f"Error processing AI response: {str(e)}",
+                            "error": "Error processing AI response. Check Home Assistant logs for details.",
                         }
                     )
 
@@ -4420,7 +4415,7 @@ Then restart Home Assistant to see your new dashboard in the sidebar."""
             except NameError:
                 pass  # Exception occurred before history_rollback_index was set
             return _with_debug(
-                {"success": False, "error": f"Error in process_query: {str(e)}"}
+                {"success": False, "error": "Error processing query. Check Home Assistant logs for details."}
             )
 
     def _build_debug_trace(
@@ -4689,7 +4684,7 @@ Then restart Home Assistant to see your new dashboard in the sidebar."""
 
         except Exception as e:
             _LOGGER.exception("Error setting entity state: %s", str(e))
-            return {"error": f"Error setting entity state: {str(e)}"}
+            return {"error": "Error setting entity state. Check Home Assistant logs for details."}
 
     async def call_service(
         self,
@@ -4759,7 +4754,7 @@ Then restart Home Assistant to see your new dashboard in the sidebar."""
             _LOGGER.exception(
                 "Error calling service %s.%s: %s", domain, service, str(e)
             )
-            return {"error": f"Error calling service {domain}.{service}: {str(e)}"}
+            return {"error": "Error calling service. Check Home Assistant logs for details."}
 
     async def save_user_prompt_history(
         self, user_id: str, history: List[str]
@@ -4771,7 +4766,7 @@ Then restart Home Assistant to see your new dashboard in the sidebar."""
             return {"success": True}
         except Exception as e:
             _LOGGER.exception("Error saving prompt history: %s", str(e))
-            return {"error": f"Error saving prompt history: {str(e)}"}
+            return {"error": "Error saving prompt history. Check Home Assistant logs for details."}
 
     async def load_user_prompt_history(self, user_id: str) -> Dict[str, Any]:
         """Load user's prompt history from HA storage."""
@@ -4782,4 +4777,4 @@ Then restart Home Assistant to see your new dashboard in the sidebar."""
             return {"success": True, "history": history}
         except Exception as e:
             _LOGGER.exception("Error loading prompt history: %s", str(e))
-            return {"error": f"Error loading prompt history: {str(e)}", "history": []}
+            return {"error": "Error loading prompt history. Check Home Assistant logs for details.", "history": []}
