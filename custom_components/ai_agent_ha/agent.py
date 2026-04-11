@@ -1994,7 +1994,7 @@ class AiAgentHaAgent:
         """Get the state of a specific entity."""
         try:
             _LOGGER.debug("Requesting entity state for: %s", entity_id)
-            state = self.hass.states.get(entity_id)
+            state = self.hass.states.async_get(entity_id)
             if not state:
                 _LOGGER.warning("Entity not found: %s", entity_id)
                 return {"error": f"Entity {entity_id} not found"}
@@ -2366,7 +2366,7 @@ class AiAgentHaAgent:
             result = []
             for entry in entity_registry.entities.values():
                 # Get the current state to access device_class and other attributes
-                state = self.hass.states.get(entry.entity_id)
+                state = self.hass.states.async_get(entry.entity_id)
                 device_class = state.attributes.get("device_class") if state else None
                 state_class = state.attributes.get("state_class") if state else None
                 unit_of_measurement = (
@@ -4501,7 +4501,7 @@ class AiAgentHaAgent:
             )
 
             # Validate entity exists
-            if not self.hass.states.get(entity_id):
+            if not self.hass.states.async_get(entity_id):
                 return {"error": f"Entity {entity_id} not found"}
 
             # Call the appropriate service based on the domain
@@ -4564,7 +4564,7 @@ class AiAgentHaAgent:
                 self.hass.states.async_set(entity_id, state, attributes or {})
 
             # Get the new state to confirm the change
-            new_state = self.hass.states.get(entity_id)
+            new_state = self.hass.states.async_get(entity_id)
             return {
                 "success": True,
                 "entity_id": entity_id,
@@ -4623,7 +4623,7 @@ class AiAgentHaAgent:
             result_entities = []
             if "entity_id" in call_data:
                 for entity_id in call_data["entity_id"]:
-                    state = self.hass.states.get(entity_id)
+                    state = self.hass.states.async_get(entity_id)
                     if state:
                         result_entities.append(
                             {
