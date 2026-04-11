@@ -49,6 +49,43 @@ from .const import CONF_WEATHER_ENTITY, DOMAIN
 _LOGGER = logging.getLogger(__name__)
 
 
+# === JSON/YAML Extraction Utility ===
+def _extract_json_from_text(text: str) -> Optional[dict]:
+    """Extract a JSON object from text that may contain markdown fences or prose."""
+    # Strip markdown code fences
+    fence_match = re.search(r"```(?:json|yaml)?\s*([\s\S]*?)```", text)
+    if fence_match:
+        text = fence_match.group(1).strip()
+
+    # Try direct parse
+    try:
+        result = json.loads(text)
+        if isinstance(result, dict):
+            return result
+    except (json.JSONDecodeError, ValueError):
+        pass
+
+    # Find first { and try from there
+    start = text.find("{")
+    if start != -1:
+        try:
+            result = json.loads(text[start:])
+            if isinstance(result, dict):
+                return result
+        except (json.JSONDecodeError, ValueError):
+            pass
+
+    # Try YAML as last resort
+    try:
+        result = yaml.safe_load(text[start:] if start >= 0 else text)
+        if isinstance(result, dict):
+            return result
+    except Exception:
+        pass
+
+    return None
+
+
 # === Security Utilities ===
 def sanitize_for_logging(data: Any, mask: str = "***REDACTED***") -> Any:
     """Sanitize sensitive data for safe logging.
@@ -2881,26 +2918,21 @@ class AiAgentHaAgent:
     async def create_dashboard(
         self, dashboard_config: Dict[str, Any]
     ) -> Dict[str, Any]:
-        """Create a new dashboard using Home Assistant's Lovelace Storage API.
+        """Save views/cards config to an existing dashboard.
 
-        This uses the storage-mode approach which:
-        - Creates the dashboard instantly (no restart required)
-        - Shows immediately in the HA sidebar
-        - Stores config in .storage/ (managed by HA, no manual file editing)
+        Dashboard entry creation is now handled by the frontend via WebSocket
+        commands (lovelace/dashboards/create + lovelace/config/save).
+        This service is kept for saving config to an already-registered dashboard.
         """
         try:
             _LOGGER.debug(
-                "Creating dashboard with config: %s",
+                "create_dashboard called with config: %s",
                 json.dumps(dashboard_config, default=str),
             )
 
-            # Validate required fields
             title = dashboard_config.get("title")
             if not title:
                 return {"error": "Dashboard title is required"}
-
-            # Generate url_path from title if not provided
-            import re
 
             url_path = dashboard_config.get("url_path")
             if not url_path:
@@ -2908,12 +2940,12 @@ class AiAgentHaAgent:
             else:
                 url_path = re.sub(r"[^a-z0-9]+", "-", url_path.lower()).strip("-")
 
-            icon = dashboard_config.get("icon", "mdi:view-dashboard")
-            show_in_sidebar = dashboard_config.get("show_in_sidebar", True)
-            require_admin = dashboard_config.get("require_admin", False)
+            # Ensure url_path contains a hyphen (HA requirement)
+            if "-" not in url_path:
+                url_path = url_path + "-dashboard"
+
             views = dashboard_config.get("views", [{"title": "Home", "cards": []}])
 
-            # --- Lovelace Storage API approach (instant, no restart) ---
             try:
                 from homeassistant.components.lovelace import DOMAIN as LOVELACE_DOMAIN
 
@@ -2924,122 +2956,37 @@ class AiAgentHaAgent:
                 if not hasattr(lovelace_data, "dashboards"):
                     return {"error": "Lovelace dashboards not available"}
 
-                # Check if a dashboard with this url_path already exists
-                existing_dashboards = lovelace_data.dashboards
-                if url_path in existing_dashboards:
-                    return {"error": f"Dashboard '{url_path}' already exists"}
-
-                # Step 1: Create the dashboard entry via the DashboardsCollection.
-                # In HA 2024+ `lovelace_data.dashboards` is a DashboardsCollection.
-                # We try `.async_create_item()` on it first (the correct HA API),
-                # then fall back to older/internal methods.
-                dashboard_created = False
-                dashboard_entry_config = {
-                    "url_path": url_path,
-                    "title": title,
-                    "icon": icon,
-                    "show_in_sidebar": show_in_sidebar,
-                    "require_admin": require_admin,
-                    "mode": "storage",
-                }
-
-                # Primary: DashboardsCollection.async_create_item (HA 2024+)
-                if hasattr(existing_dashboards, "async_create_item"):
-                    await existing_dashboards.async_create_item(dashboard_entry_config)
-                    dashboard_created = True
-                # Fallback 1: lovelace_data level helpers
-                elif hasattr(lovelace_data, "async_create_dashboard"):
-                    await lovelace_data.async_create_dashboard(dashboard_entry_config)
-                    dashboard_created = True
-                elif hasattr(lovelace_data, "async_create"):
-                    await lovelace_data.async_create(dashboard_entry_config)
-                    dashboard_created = True
-                else:
-                    # Fallback 2: internal dashboards_collection attribute
-                    dashboards_collection = getattr(
-                        lovelace_data, "dashboards_collection", None
-                    )
-                    if dashboards_collection is not None and hasattr(
-                        dashboards_collection, "async_create_item"
-                    ):
-                        await dashboards_collection.async_create_item(dashboard_entry_config)
-                        dashboard_created = True
-
-                if not dashboard_created:
-                    _LOGGER.warning(
-                        "Lovelace Storage API not found, available attrs on lovelace_data: %s, "
-                        "available attrs on dashboards: %s",
-                        [a for a in dir(lovelace_data) if not a.startswith("_")],
-                        [a for a in dir(existing_dashboards) if not a.startswith("_")],
-                    )
+                dashboard_store = lovelace_data.dashboards.get(url_path)
+                if dashboard_store is None:
                     return {
-                        "error": "Lovelace Storage API not available on this HA version. "
-                        "Please update Home Assistant to 2024.1 or later."
+                        "error": f"Dashboard '{url_path}' not found. "
+                        "Create it first via the frontend UI."
                     }
 
-                # Step 2: Save the views/cards configuration to the new dashboard.
-                # After creating the entry, re-read dashboards to pick up the new one.
-                dashboards_after = lovelace_data.dashboards
-                dashboard_store = dashboards_after.get(url_path)
-                if dashboard_store is not None:
-                    config_to_save = {"views": views}
-
-                    # Try async_save first, then async_save_config
-                    if hasattr(dashboard_store, "async_save"):
-                        await dashboard_store.async_save(config_to_save)
-                    elif hasattr(dashboard_store, "async_save_config"):
-                        await dashboard_store.async_save_config(config_to_save)
-                    elif hasattr(dashboard_store, "config") and hasattr(dashboard_store, "async_save"):
-                        dashboard_store.config = config_to_save
-                        await dashboard_store.async_save(None)
-                    else:
-                        _LOGGER.warning(
-                            "Could not save dashboard views — "
-                            "dashboard entry created but views may be empty. "
-                            "Available methods: %s",
-                            [
-                                a
-                                for a in dir(dashboard_store)
-                                if not a.startswith("_")
-                            ],
-                        )
+                config_to_save = {"views": views}
+                if hasattr(dashboard_store, "async_save"):
+                    await dashboard_store.async_save(config_to_save)
+                elif hasattr(dashboard_store, "async_save_config"):
+                    await dashboard_store.async_save_config(config_to_save)
                 else:
-                    _LOGGER.warning(
-                        "Dashboard entry '%s' was created but could not be found "
-                        "in lovelace_data.dashboards for saving views. "
-                        "Available keys: %s",
-                        url_path,
-                        list(dashboards_after.keys()) if hasattr(dashboards_after, "keys") else str(dashboards_after),
-                    )
+                    return {"error": "Dashboard found but save API not available"}
 
-                _LOGGER.info(
-                    "Successfully created storage-mode dashboard: %s", url_path
-                )
-
-                success_message = (
-                    f"Dashboard '{title}' created successfully!\n\n"
-                    f"The dashboard is now available in your sidebar — "
-                    f"no restart required.\n"
-                    f"URL: /lovelace-{url_path}"
-                )
-
+                _LOGGER.info("Saved config to dashboard: %s", url_path)
                 return {
                     "success": True,
-                    "message": success_message,
+                    "message": (
+                        f"Dashboard '{title}' updated successfully!\n\n"
+                        f"URL: /lovelace-{url_path}"
+                    ),
                     "url_path": url_path,
-                    "restart_required": False,
                 }
 
             except Exception as e:
-                _LOGGER.error(
-                    "Lovelace Storage API create failed: %s", e, exc_info=True
-                )
-                return {
-                    "error": f"Failed to create dashboard via Lovelace Storage API: {e}"
-                }
+                _LOGGER.error("create_dashboard failed: %s", e, exc_info=True)
+                return {"error": f"Failed to save dashboard config: {e}"}
 
         except Exception as e:
-            _LOGGER.exception("Error creating dashboard: %s", str(e))
+            _LOGGER.exception("Error in create_dashboard: %s", str(e))
             return {
                 "error": "Error creating dashboard. Check Home Assistant logs for details."
             }
@@ -4179,24 +4126,23 @@ class AiAgentHaAgent:
                             ]
                             return result
 
-                        # Try YAML recovery for dashboard responses before falling back to final_response
-                        yaml_dashboard_indicators = ["title:", "views:", "cards:", "type: custom:", "type: entities", "dashboard:"]
+                        # Try YAML / markdown-wrapped JSON recovery for dashboard responses
+                        yaml_dashboard_indicators = ["title:", "views:", "cards:", "type: custom:", "type: entities", "dashboard:", "```yaml", "```json"]
                         if any(indicator in response for indicator in yaml_dashboard_indicators):
-                            try:
-                                parsed_yaml = yaml.safe_load(response)
-                                if isinstance(parsed_yaml, dict):
-                                    # Unwrap top-level `dashboard:` key if present
-                                    if "dashboard" in parsed_yaml and isinstance(parsed_yaml["dashboard"], dict):
-                                        parsed_yaml = parsed_yaml["dashboard"]
-                                if isinstance(parsed_yaml, dict) and any(
-                                    k in parsed_yaml for k in ["title", "views", "cards"]
+                            recovered = _extract_json_from_text(response)
+                            if recovered is not None:
+                                # Unwrap top-level `dashboard:` key if present
+                                if "dashboard" in recovered and isinstance(recovered["dashboard"], dict):
+                                    recovered = recovered["dashboard"]
+                                if isinstance(recovered, dict) and any(
+                                    k in recovered for k in ["title", "views", "cards"]
                                 ):
                                     _LOGGER.warning(
-                                        "LLM returned YAML for dashboard — recovering via yaml.safe_load()"
+                                        "LLM returned YAML/markdown for dashboard — recovered via _extract_json_from_text()"
                                     )
                                     response_data = {
                                         "request_type": "dashboard_suggestion",
-                                        "dashboard": parsed_yaml,
+                                        "dashboard": recovered,
                                     }
                                     # Route through the normal dashboard_suggestion path
                                     self.conversation_history.append(
@@ -4216,8 +4162,6 @@ class AiAgentHaAgent:
                                     self._trim_history()
                                     self._set_cached_data(cache_key, result)
                                     return result
-                            except yaml.YAMLError:
-                                pass
 
                         # If response is not valid JSON, try to wrap it as a final response
                         try:
