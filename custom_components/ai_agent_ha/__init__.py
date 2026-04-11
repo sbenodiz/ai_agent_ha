@@ -88,6 +88,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             "anthropic",
             "alter",
             "zai",
+            "asksage",
             "local",
         ]:
             _LOGGER.error("Unknown AI provider: %s", provider)
@@ -110,7 +111,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     "gemini_token",
                     "openrouter_token",
                     "anthropic_token",
+                    "alter_token",
                     "zai_token",
+                    "asksage_token",
                 ]
             },
         )
