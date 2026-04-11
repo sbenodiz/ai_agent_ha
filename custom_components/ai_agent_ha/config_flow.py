@@ -24,6 +24,7 @@ from .const import (
     CONF_LOCAL_MODEL,
     CONF_LOCAL_URL,
     CONF_OPENAI_BASE_URL,
+    CONF_PERSIST_CHAT_HISTORY,
     DOMAIN,
 )
 
@@ -535,6 +536,11 @@ class AiAgentHaOptionsFlowHandler(config_entries.OptionsFlow):
                     updated_data["ai_provider"] = provider
                     updated_data[token_field] = token_value
 
+                    # Chat persistence opt-in
+                    updated_data[CONF_PERSIST_CHAT_HISTORY] = user_input.get(
+                        CONF_PERSIST_CHAT_HISTORY, False
+                    )
+
                     # For OpenAI, persist custom base URL if provided
                     if provider == "openai":
                         base_url = user_input.get(CONF_OPENAI_BASE_URL, "").strip()
@@ -584,6 +590,9 @@ class AiAgentHaOptionsFlowHandler(config_entries.OptionsFlow):
                 _LOGGER.exception("Unexpected exception in options flow")
                 errors["base"] = "unknown"
 
+        # Current persistence setting (shared across all provider schemas)
+        current_persist = self.config_entry.data.get(CONF_PERSIST_CHAT_HISTORY, False)
+
         # Build schema for the selected provider in options
         if provider == "zai":
             current_endpoint = self.config_entry.data.get("zai_endpoint", "general")
@@ -606,6 +615,7 @@ class AiAgentHaOptionsFlowHandler(config_entries.OptionsFlow):
                 vol.Optional("custom_model"): TextSelector(
                     TextSelectorConfig(type="text")
                 ),
+                vol.Optional(CONF_PERSIST_CHAT_HISTORY, default=current_persist): BooleanSelector(),
             }
 
             return self.async_show_form(
@@ -638,6 +648,7 @@ class AiAgentHaOptionsFlowHandler(config_entries.OptionsFlow):
             schema_dict[vol.Optional("custom_model")] = TextSelector(
                 TextSelectorConfig(type="text")
             )
+            schema_dict[vol.Optional(CONF_PERSIST_CHAT_HISTORY, default=current_persist)] = BooleanSelector()
 
             return self.async_show_form(
                 step_id="configure_options",
@@ -700,6 +711,7 @@ class AiAgentHaOptionsFlowHandler(config_entries.OptionsFlow):
                     )
                 ),
                 vol.Optional(CONF_ASKSAGE_DEEP_AGENT, default=current_deep_agent): BooleanSelector(),
+                vol.Optional(CONF_PERSIST_CHAT_HISTORY, default=current_persist): BooleanSelector(),
             }
 
             return self.async_show_form(
@@ -739,6 +751,8 @@ class AiAgentHaOptionsFlowHandler(config_entries.OptionsFlow):
             schema_dict[vol.Optional("custom_model")] = TextSelector(
                 TextSelectorConfig(type="text")
             )
+
+        schema_dict[vol.Optional(CONF_PERSIST_CHAT_HISTORY, default=current_persist)] = BooleanSelector()
 
         return self.async_show_form(
             step_id="configure_options",
