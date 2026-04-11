@@ -153,8 +153,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             )
             hass.bus.async_fire("ai_agent_ha_response", result)
         except Exception as e:
-            _LOGGER.error(f"Error processing query: {e}")
-            result = {"error": str(e)}
+            _LOGGER.error("Query service error: %s", str(e), exc_info=True)
+            result = {"error": "Unable to process request. Check Home Assistant logs for details."}
             hass.bus.async_fire("ai_agent_ha_response", result)
 
     async def async_handle_create_automation(call):
@@ -181,8 +181,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             result = await agent.create_automation(call.data.get("automation", {}))
             return result
         except Exception as e:
-            _LOGGER.error(f"Error creating automation: {e}")
-            return {"error": str(e)}
+            _LOGGER.error("Create automation service error: %s", str(e), exc_info=True)
+            return {"error": "Unable to process request. Check Home Assistant logs for details."}
 
     async def async_handle_save_prompt_history(call):
         """Handle the save_prompt_history service call."""
@@ -211,8 +211,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             )
             return result
         except Exception as e:
-            _LOGGER.error(f"Error saving prompt history: {e}")
-            return {"error": str(e)}
+            _LOGGER.error("Save prompt history service error: %s", str(e), exc_info=True)
+            return {"error": "Unable to process request. Check Home Assistant logs for details."}
 
     async def async_handle_load_prompt_history(call):
         """Handle the load_prompt_history service call."""
@@ -240,8 +240,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             _LOGGER.debug("Load prompt history result: %s", result)
             return result
         except Exception as e:
-            _LOGGER.error(f"Error loading prompt history: {e}")
-            return {"error": str(e)}
+            _LOGGER.error("Load prompt history service error: %s", str(e), exc_info=True)
+            return {"error": "Unable to process request. Check Home Assistant logs for details."}
 
     async def async_handle_create_dashboard(call):
         """Handle the create_dashboard service call."""
@@ -273,14 +273,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
                     dashboard_config = json.loads(dashboard_config)
                 except json.JSONDecodeError as e:
-                    _LOGGER.error(f"Invalid JSON in dashboard_config: {e}")
-                    return {"error": f"Invalid JSON in dashboard_config: {e}"}
+                    _LOGGER.error("Invalid JSON in dashboard_config: %s", str(e))
+                    return {"error": "Invalid JSON in dashboard_config. Check Home Assistant logs for details."}
 
             result = await agent.create_dashboard(dashboard_config)
             return result
         except Exception as e:
-            _LOGGER.error(f"Error creating dashboard: {e}")
-            return {"error": str(e)}
+            _LOGGER.error("Create dashboard service error: %s", str(e), exc_info=True)
+            return {"error": "Unable to process request. Check Home Assistant logs for details."}
 
     async def async_handle_update_dashboard(call):
         """Handle the update_dashboard service call."""
@@ -312,8 +312,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
                     dashboard_config = json.loads(dashboard_config)
                 except json.JSONDecodeError as e:
-                    _LOGGER.error(f"Invalid JSON in dashboard_config: {e}")
-                    return {"error": f"Invalid JSON in dashboard_config: {e}"}
+                    _LOGGER.error("Invalid JSON in dashboard_config: %s", str(e))
+                    return {"error": "Invalid JSON in dashboard_config. Check Home Assistant logs for details."}
 
             dashboard_url = call.data.get("dashboard_url", "")
             if not dashboard_url:
@@ -322,8 +322,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             result = await agent.update_dashboard(dashboard_url, dashboard_config)
             return result
         except Exception as e:
-            _LOGGER.error(f"Error updating dashboard: {e}")
-            return {"error": str(e)}
+            _LOGGER.error("Update dashboard service error: %s", str(e), exc_info=True)
+            return {"error": "Unable to process request. Check Home Assistant logs for details."}
 
     @websocket_api.websocket_command(
         {vol.Required("type"): "ai_agent_ha/get_providers"}
