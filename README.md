@@ -1,372 +1,190 @@
-# AI Agent HA
+# AI Agent HA Extended
 
-A powerful Home Assistant custom integration that connects your Home Assistant instance with multiple AI providers (OpenAI, Google Gemini, Anthropic (Claude), OpenRouter, Alter, z.ai, and Llama) to translate user requests into valid Home Assistant operations, including creating automations automatically!
+**Actively maintained fork of AI Agent HA — with expanded provider support, bug fixes, and enhanced UI**
 
-## 🚀 Quick Install
-
-[![Open your Home Assistant instance and open a repository inside the Home Assistant Community Store.](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=sbenodiz&repository=ai_agent_ha&category=integration)
-
-Click the button above to install AI Agent HA directly through HACS, or see the [detailed installation instructions](#-installation) below.
-
-
-## ☕ Support the Project
-
-If you find this integration helpful and would like to support its development, you can buy me a coffee! Your support helps keep this project active and maintained. Currently I am the only Dev on that project and looking to have more paretners here.
-
-[![Buy Me A Coffee](https://img.shields.io/badge/buy%20me%20a%20coffee-tips-yellow.svg)](https://www.buymeacoffee.com/sbenodiz)
-
-Every contribution, no matter how small, is greatly appreciated and helps fund the continued development and improvement of AI Agent HA.
-
-Another way to support me will be to try my new project. Askie - AI for kids. I am looking for feedback on this one: ⁠Web: https://kidsai.app • ⁠iOS: https://apps.apple.com/app/id6749299565  ⁠Android: https://play.google.com/store/apps/details?id=com.askie.app
-
-
-## ✨ Features
-
-- 🤖 **Multiple AI Provider Support**: OpenAI, Google Gemini, Anthropic (Claude), OpenRouter, Alter, z.ai, and Llama
-- 🎯 **Model Selection**: Choose from predefined models or use custom model names
-- 🏠 **Smart Home Control**: Turn lights on/off, control climate, and manage devices
-- ⚡ **Automation Creation**: Automatically create automations based on natural language
-- 📋 **Dashboard Creation**: Create and customize Home Assistant dashboards through natural language
-- 📊 **Data Access**: Get entity states, history, weather, and more
-- 🔒 **Secure**: API keys stored securely in Home Assistant
-- 🎨 **Beautiful UI**: Clean, modern chat interface
-- 🔄 **Real-time**: Instant responses and updates
-
-## 📸 Screenshots
-
-### Automation Creation
-![AI Agent HA Automation Creation](image/Screenshot2.png)
-
-## 📋 Dashboard Creation
-
-AI Agent HA now supports creating and managing Home Assistant dashboards through natural language conversations! Simply describe what you want, and the AI will create a complete dashboard for you.
-
-### How Dashboard Creation Works
-
-1. **Natural Language Request**: Ask the AI to create a dashboard for any purpose
-2. **Entity Discovery**: The AI automatically finds relevant entities in your Home Assistant
-3. **Smart Organization**: Entities are organized by room, functionality, or domain
-4. **Dashboard Generation**: Complete dashboard with proper cards and layout is created
-5. **Integration**: Dashboard is automatically added to your Home Assistant sidebar
-6. **Restart Required**: You'll need to restart Home Assistant to see the new dashboard in your sidebar
-
-### Dashboard Creation Examples
-
-#### Simple Room Dashboard
-```
-"Create a dashboard for my living room lights"
-```
-The AI will find all living room light entities and create a dashboard with appropriate light control cards.
-
-#### Security Dashboard
-```
-"Create a security dashboard with all door sensors, cameras, and alarm controls"
-```
-The AI will create a comprehensive security monitoring dashboard with sensor states, camera feeds, and alarm controls. After creation, restart Home Assistant to see the new dashboard in your sidebar.
-
-#### Energy Monitoring Dashboard
-```
-"I want an energy dashboard showing power consumption and usage graphs"
-```
-The AI will create an energy monitoring dashboard with real-time power gauges, usage graphs, and cost tracking.
-
-#### Climate Control Dashboard
-```
-"Create a climate dashboard for temperature control throughout the house"
-```
-The AI will organize thermostats, temperature sensors, and HVAC controls in a logical layout.
-
-### Supported Dashboard Features
-
-- **Smart Card Selection**: Appropriate card types for each entity (lights, sensors, media players, etc.)
-- **Room-Based Organization**: Entities automatically grouped by area when possible
-- **Interactive Clarification**: AI asks follow-up questions to refine your requirements
-- **Template-Based Creation**: Built-in templates for common dashboard types (security, energy, climate, etc.)
-- **Dynamic Layout**: Optimized card arrangements and view organization
-- **Icon Integration**: Automatic Material Design icon selection
-
-### Dashboard Types the AI Can Create
-
-- **Room-Specific**: Living room, bedroom, kitchen, etc.
-- **Functional**: Security, energy, climate, media, lighting
-- **Device-Specific**: All lights, all sensors, all switches
-- **Scenario-Based**: Morning routine, evening security, vacation mode
-- **Custom**: Any combination based on your specific needs
-
-For detailed dashboard creation documentation, see: [Dashboard Creation Guide](docs/DASHBOARD_CREATION.md)
-
-## 🚀 Supported AI Providers
-
-### OpenAI
-- **Models**: GPT-3.5 Turbo, GPT-4, GPT-4 Turbo, GPT-4o, GPT-5, O1-Preview, O1-Mini
-- **Setup**: Get API key from [OpenAI Platform](https://platform.openai.com/api-keys)
-
-### Google Gemini
-- **Models**: Gemini 1.5 Flash, Gemini 1.5 Pro, Gemini 1.0 Pro, Gemini 2.0 Flash Exp
-- **Setup**: Get API key from [Google AI Studio](https://aistudio.google.com/app/apikey)
-
-### Anthropic (Claude)
-- **Models**: Claude 3.5 Sonnet, Claude 3.5 Haiku, Claude 3 Opus, Claude 3 Sonnet, Claude 3 Haiku
-- **Setup**: Get API key from [Anthropic Console](https://docs.anthropic.com/en/docs/get-started)
-- **Popular Models**:
-  - `claude-3-5-sonnet-20241022` (Latest and most capable)
-  - `claude-3-5-haiku-20241022` (Fast and efficient)
-  - `claude-3-opus-20240229` (Most powerful for complex tasks)
-
-### OpenRouter
-- **Models**: Access to 100+ models including Claude, Llama, Mistral, and more
-- **Setup**: Get API key from [OpenRouter](https://openrouter.ai/keys)
-- **Popular Models**: 
-  - `anthropic/claude-3.5-sonnet`
-  - `meta-llama/llama-3.1-70b-instruct`
-  - `mistralai/mixtral-8x7b-instruct`
-
-### Llama
-- **Models**: Llama 4 Maverick, Llama 3.1, Llama 3.2
-- **Setup**: Get API key from your Llama provider
-
-### Alter
-- **Models**: Various custom models
-- **Setup**: Get API key from [Alter HQ](https://alterhq.com)
-
-### z.ai
-- **Models**: GLM-4.7, GLM-4.6, GLM-4.5, GLM-4.5-air, GLM-4.5-x, GLM-4.5-airx, GLM-4.5-flash
-- **Setup**: Get API key from [Z.ai Platform](https://z.ai/manage-apikey/apikey-list)
-- **Endpoints**:
-  - General Purpose: Standard AI tasks
-  - Coding: Optimized for coding scenarios (3× usage, 1/7 cost)
-- **Popular Models**:
-  - `glm-4.7` (Latest flagship model)
-  - `glm-4.5-flash` (Fast and efficient)
-
-## 📦 Installation
-
-### HACS Installation (Recommended)
-
-Use the [Quick Install button](#-quick-install) at the top of this README for the easiest installation, or manually add the repository:
-
-1. Open HACS in your Home Assistant instance
-2. Click on "Integrations"
-3. Click the three dots in the top right corner
-4. Select "Custom repositories"
-5. Add this repository: `https://github.com/sbenodiz/ai_agent_ha`
-6. Select "Integration" as the category
-7. Click "Add"
-8. Find "AI Agent HA" in the integration list
-9. Click "Download"
-10. Restart Home Assistant
-11. Go to Settings → Devices & Services → Add Integration
-12. Search for "AI Agent HA"
-13. Follow the setup wizard to configure your preferred AI provider
-
-### Manual Installation
-
-1. Download the latest release from the [releases page](https://github.com/sbenodiz/ai_agent_ha/releases)
-2. Extract the files
-3. Copy the `custom_components/ai_agent_ha` folder to your Home Assistant `custom_components` directory
-4. Restart Home Assistant
-5. Go to Settings → Devices & Services → Add Integration
-6. Search for "AI Agent HA"
-7. Follow the setup wizard to configure your preferred AI provider
-
-## ⚙️ Configuration
-
-The integration uses a two-step configuration process:
-
-### Step 1: Choose AI Provider
-Select your preferred AI provider from the dropdown:
-- OpenAI
-- Google Gemini
-- Anthropic (Claude)
-- OpenRouter
-- Alter
-- z.ai
-- Llama
-- Local Model
-
-### Step 2: Configure Provider
-Enter your API credentials and optionally select a model:
-- **API Key/Token**: Your provider-specific API key
-- **Model**: Choose from predefined models or enter a custom model name
-
-### Configuration Examples
-
-```yaml
-# Example configuration.yaml (optional - integration supports config flow only)
-ai_agent_ha:
-  ai_provider: anthropic
-  anthropic_token: "sk-ant-..."
-  models:
-    anthropic: "claude-3-5-sonnet-20241022"
-```
-
-```yaml
-# Example with z.ai provider
-ai_agent_ha:
-  ai_provider: zai
-  zai_token: "your-zai-api-key"
-  zai_endpoint: "general"  # or "coding" for coding-optimized endpoint
-  models:
-    zai: "glm-4.7"
-```
-
-```yaml
-# Example with Alter provider
-ai_agent_ha:
-  ai_provider: alter
-  alter_token: "your-alter-api-key"
-  models:
-    alter: "your-model-name"
-```
-
-## 🎮 Usage
-
-### Chat Interface
-Access the beautiful chat interface at:
-- **Sidebar**: AI Agent HA panel
-- **URL**: `http://your-ha-instance:8123/ai_agent_ha`
-
-
-
-## 🔧 Advanced Features
-
-### Custom Models
-Enter any model name in the "Custom Model" field:
-- OpenAI: `gpt-4-0125-preview`
-- Anthropic: `claude-3-opus-20240229`
-- OpenRouter: `anthropic/claude-3-opus`
-- Gemini: `gemini-pro-vision`
-- Alter: `your-custom-model-name`
-- z.ai: `glm-4.7`
-- Llama: `Llama-4-Maverick-17B-128E-Instruct-FP8`
-
-### Automation Creation
-The AI can create automations automatically:
-1. Ask: "Create an automation to turn on lights at sunset"
-2. Review the generated automation
-3. Approve or reject the suggestion
-4. Automation is added to your Home Assistant
-
-### Dashboard Creation
-The AI can create custom dashboards through conversation:
-1. Ask: "Create a security dashboard with cameras and sensors"
-2. AI discovers relevant entities and asks clarifying questions
-3. Dashboard is generated with appropriate cards and layout
-4. Dashboard is automatically added to your Home Assistant sidebar
-5. Restart Home Assistant to see the new dashboard
-
-### Data Access
-The AI can access comprehensive Home Assistant data:
-- Entity states and history
-- Weather information
-- Person locations
-- Device registry
-- Area/room information
-- Statistics and analytics
-
-## 🛠️ Development
-
-### Contributing
-We welcome contributions from the community! Whether you're fixing bugs, adding features, or improving documentation, your help is appreciated.
-
-Please check out our [contribution guidelines](CONTRIBUTING.md) for detailed information on how to contribute to this project.
-
-#### Quick Start
-1. Fork the repository
-2. Create a feature branch
-3. Make your changes
-4. Test thoroughly
-5. Submit a pull request
-
-For security issues, please review our [security policy](SECURITY.md).
-
-### Local Frontend Testing
-
-You can test the frontend UI locally without deploying to Home Assistant:
-
-1. **Start the local test server:**
-   ```bash
-   cd tests/frontend
-   python3 serve.py
-   ```
-
-2. **Open your browser:**
-   Navigate to `http://localhost:8000/test_panel.html`
-
-3. **Test the interface:**
-   The test page provides a mock Home Assistant environment where you can test UI changes, styling, and component behavior without needing a full Home Assistant installation.
-
-**Test files location:**
-- `tests/frontend/test_panel.html` - Standalone test page
-- `tests/frontend/serve.py` - Simple HTTP server for testing
-
-This is particularly useful for:
-- Testing CSS changes and styling
-- Verifying UI layout and responsiveness
-- Debugging frontend JavaScript issues
-- Quick iteration on visual changes
-
-### CI/CD Workflows
-
-This project uses GitHub Actions to ensure code quality and reliability:
-
-- **Quality Checks**: Runs all checks in a single workflow (Python 3.12)
-- **Python Linting**: Checks code style with flake8, black, and isort
-- **Python Type Checking**: Verifies typing with mypy (Python 3.12 compatibility)
-- **Python Tests**: Runs tests with pytest (Python 3.12)
-- **Security Scan**: Checks for security vulnerabilities with Bandit
-- **Home Assistant Validation**: Validates the integration with hassfest
-- **HACS Validation**: Ensures compatibility with HACS
-
-All workflows run automatically on push and pull requests using Python 3.12 to ensure compatibility with the latest Home Assistant versions. You can also run them manually via the "Actions" tab in the GitHub repository.
-
-### API Structure
-The integration provides these main components:
-- **AI Clients**: Modular providers (OpenAI, Gemini, Anthropic (Claude), OpenRouter, Alter, z.ai, Llama, Local)
-- **Agent**: Core logic for processing requests
-- **Config Flow**: Setup and options management
-- **Frontend**: Chat interface
-- **Dashboard Templates**: Templates for dashboard creation
-
-## 📋 Requirements
-
-- Home Assistant 2023.3+
-- **Python 3.12+** (required for compatibility with Home Assistant 2025.1.x+)
-- One of the supported AI provider API keys
-
-### Python Version Note
-
-**Important**: Starting with version 0.99.3, this integration requires Python 3.12 or later. This change was made to ensure compatibility with Home Assistant 2025.1.x and later versions, which use syntax features only available in Python 3.12+.
-
-If you're running an older Home Assistant version with Python 3.11, please use version 0.99.2 or earlier of this integration.
-
-## 🔒 Security
-
-- API keys are stored securely in Home Assistant's encrypted storage
-- All communication uses HTTPS
-- No data is stored outside your Home Assistant instance
-- Provider-specific security practices are followed
-
-
-
-## 📝 License
-
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
-
-## 🆘 Support
-
-- **Troubleshooting**: [Troubleshooting Guide](docs/TROUBLESHOOTING.md) - Common issues and solutions
-- **Issues**: [GitHub Issues](https://github.com/sbenodiz/ai_agent_ha/issues)
-- **Discussions**: [GitHub Discussions](https://github.com/sbenodiz/ai_agent_ha/discussions)
-- **Documentation**: [Wiki](https://github.com/sbenodiz/ai_agent_ha/wiki)
-
-## 🙏 Acknowledgments
-
-- Home Assistant community for the excellent platform
-- All AI providers for their powerful APIs
-- Special thanks to @RmG152 for their valuable help with development
-- Contributors and testers who help improve this integration
+[![hacs_badge](https://img.shields.io/badge/HACS-Custom-orange.svg)](https://github.com/JLay2026/ai_agent_ha)
+![Version](https://img.shields.io/badge/version-v1.08.15-blue.svg)
 
 ---
 
-**Made with ❤️ for the Home Assistant community**
+## What's new in this fork vs the original
+
+| Feature | Upstream | This Fork |
+|---|---|---|
+| Ask Sage AI provider | ❌ | ✅ |
+| Local model (LM Studio/Ollama) auto-detect | Basic | ✅ Full OpenAI-compat |
+| HA context sent to cloud models | ❌ Broken | ✅ Fixed |
+| Dashboard suggestion rendering | ❌ Broken | ✅ Fixed |
+| Conversation history cap (prevents memory bloat) | ❌ | ✅ 50-entry cap |
+| History rollback on error | ❌ | ✅ |
+| Concurrent query protection | ❌ | ✅ asyncio.Lock |
+| Ask Sage overload retry | ❌ | ✅ 3× backoff |
+| Thinking/reasoning strip | ❌ | ✅ |
+| Anthropic Claude updated models | ❌ claude-sonnet-4-5 | ✅ claude-opus-4-6 |
+| Test coverage | ❌ | ✅ 114 tests |
+| Active releases | Irregular | ✅ v1.08.x series |
+
+---
+
+## Quick Install (HACS)
+
+[![hacs_badge](https://img.shields.io/badge/HACS-Custom-orange.svg)](https://github.com/JLay2026/ai_agent_ha)
+
+1. Open **HACS** in your Home Assistant instance.
+2. Click the **three-dot menu** (⋮) in the top-right corner and select **Custom repositories**.
+3. Enter the repository URL:
+   ```
+   https://github.com/JLay2026/ai_agent_ha
+   ```
+4. Set **Category** to `Integration` and click **Add**.
+5. Search for **AI Agent HA Extended** in HACS and click **Download**.
+6. Restart Home Assistant.
+7. Go to **Settings → Devices & Services → Add Integration** and search for **AI Agent HA**.
+
+---
+
+## Supported AI Providers
+
+This fork supports **9 AI providers**:
+
+| Provider | Notes |
+|---|---|
+| **OpenAI** | GPT-4o, GPT-4, GPT-3.5, and all current models via API key |
+| **Google Gemini** | Gemini Pro and Flash series |
+| **Anthropic (Claude)** | Updated to latest models including `claude-opus-4-6` |
+| **OpenRouter** | Access to many models via a single API key |
+| **Alter** | Alter AI provider integration |
+| **z.ai** | z.ai cloud provider |
+| **Llama** | Meta Llama model support |
+| **Local Model (LM Studio / Ollama)** | Auto-detects any OpenAI-compatible local server. Works with LM Studio, Ollama with `/v1` endpoint, and any server implementing the OpenAI API spec |
+| **Ask Sage** *(new in this fork)* | Enterprise-grade secure cloud AI. Authenticates via `x-access-tokens` header. Supports live web search toggle (off / news / all) and deep agent mode. Model list is live-fetched at config time (government-restricted models are automatically excluded) |
+
+---
+
+## Features
+
+### Home Assistant Context (Fixed in this fork)
+- Session-persistent context injection: entities, weather, and history are sent to the AI on every query
+- HA context delivery to cloud models was broken upstream — fully fixed in v1.08.10
+
+### Dashboard Creation
+- Clean dashboard suggestion cards rendered with `ha-card`, including icon, title, summary, and action buttons
+- Multi-JSON response parsing fixed in v1.08.13; UI overhauled in v1.08.14
+
+### Automation Creation
+- Suggest and create Home Assistant automations directly from the chat interface
+
+### Conversation Management
+- 50-entry conversation history cap prevents memory bloat over long sessions
+- History rollback on error keeps conversation state clean after failed requests
+- Concurrent query protection via `asyncio.Lock` prevents race conditions
+
+### Reliability & Quality
+- Ask Sage overload retry with exponential backoff (3× with 1s / 2s / 4s delays)
+- Thinking/reasoning token stripping for models that emit reasoning traces
+- 114 automated tests covering core functionality
+
+### UI Improvements
+- Static provider · model label in the chat footer (replaced dropdown) for cleaner UI
+- Dashboard suggestion cards with ha-card styling, icons, and action buttons
+
+---
+
+## Installation
+
+### Via HACS (Recommended)
+
+See [Quick Install](#quick-install-hacs) above.
+
+### Manual Installation
+
+1. Download or clone this repository:
+   ```bash
+   git clone https://github.com/JLay2026/ai_agent_ha.git
+   ```
+2. Copy the `custom_components/ai_agent_ha` directory into your Home Assistant `config/custom_components/` folder:
+   ```
+   config/
+   └── custom_components/
+       └── ai_agent_ha/
+   ```
+3. Restart Home Assistant.
+4. Go to **Settings → Devices & Services → Add Integration** and search for **AI Agent HA**.
+
+---
+
+## Configuration
+
+Navigate to **Settings → Devices & Services**, find the **AI Agent HA** integration, and click **Configure**.
+
+### OpenAI
+- **API Key**: Your OpenAI API key from [platform.openai.com](https://platform.openai.com)
+- **Model**: Select from available GPT models
+
+### Google Gemini
+- **API Key**: Your Google AI API key from [aistudio.google.com](https://aistudio.google.com)
+- **Model**: Select Gemini Pro or Flash variant
+
+### Anthropic (Claude)
+- **API Key**: Your Anthropic API key from [console.anthropic.com](https://console.anthropic.com)
+- **Model**: Includes latest models up to `claude-opus-4-6`
+
+### OpenRouter
+- **API Key**: Your OpenRouter API key from [openrouter.ai](https://openrouter.ai)
+- **Model**: Any model available on OpenRouter
+
+### Alter / z.ai / Llama
+- **API Key**: Provider-specific API key
+- **Model**: Provider-available models
+
+### Local Model (LM Studio / Ollama)
+- **Base URL**: URL of your local OpenAI-compatible server (e.g., `http://localhost:1234/v1` for LM Studio, `http://localhost:11434/v1` for Ollama)
+- **Model**: Model name as reported by your local server
+- Auto-detects any OpenAI-compatible endpoint — no special configuration needed beyond the base URL
+
+### Ask Sage *(new)*
+- **Token**: Your Ask Sage `x-access-tokens` authentication token
+- **Model**: Selected from a live-fetched list of available models (government-restricted models are automatically excluded)
+- **Live Search**: Toggle web search context — `off`, `news`, or `all`
+- **Deep Agent Mode**: Enable for more thorough, multi-step reasoning responses
+
+---
+
+## Upstream Attribution
+
+This is a fork of [sbenodiz/ai_agent_ha](https://github.com/sbenodiz/ai_agent_ha). All original work is credited to the upstream author. This fork adds bug fixes and new features while remaining open to upstream merges.
+
+---
+
+## Changelog
+
+### v1.08.15
+Dashboard suggestion card upgraded to native HA components — `ha-card` with elevation shadow, `ha-chip` badges for each view, and `ha-icon` with primary color accent. Matches the look and feel of native Home Assistant UI.
+
+### v1.08.14
+Clean dashboard suggestion card UI — `ha-card` components with icon, title, summary, and action buttons for a polished, native-looking suggestion experience.
+
+### v1.08.13
+Fixed dashboard and automation suggestion rendering — resolves multi-JSON response parsing that caused suggestions to fail to display.
+
+### v1.08.12
+Replaced model dropdown with a static provider · model label in the chat footer for a cleaner, less cluttered UI.
+
+### v1.08.11
+Ask Sage retry on overload with exponential backoff — 3 retries with 1s, 2s, and 4s delays before surfacing an error to the user.
+
+### v1.08.10
+Fixed Ask Sage `system_prompt` — HA context (entities, weather, history) is now correctly injected into all Ask Sage queries.
+
+### v1.08.9
+Anthropic model updates (`claude-opus-4-6`), temperature and timeout fixes; Ask Sage live search and `deep_agent` toggles added; data scope validation improvements.
+
+---
+
+## Contributing
+
+Pull requests are welcome. For significant changes, please open an issue first to discuss what you'd like to change.
+
+## License
+
+See [LICENSE](LICENSE) in this repository.
