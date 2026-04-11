@@ -9,13 +9,23 @@ from homeassistant import config_entries
 from homeassistant.core import callback
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.selector import (
+    BooleanSelector,
+    SelectOptionDict,
     SelectSelector,
     SelectSelectorConfig,
     TextSelector,
     TextSelectorConfig,
 )
 
-from .const import CONF_ASKSAGE_TOKEN, CONF_LOCAL_MODEL, CONF_LOCAL_URL, CONF_OPENAI_BASE_URL, DOMAIN
+from .const import (
+    CONF_ASKSAGE_DEEP_AGENT,
+    CONF_ASKSAGE_LIVE,
+    CONF_ASKSAGE_TOKEN,
+    CONF_LOCAL_MODEL,
+    CONF_LOCAL_URL,
+    CONF_OPENAI_BASE_URL,
+    DOMAIN,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -390,6 +400,16 @@ class AiAgentHaConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):  # type: ig
                 vol.Optional("custom_model"): TextSelector(
                     TextSelectorConfig(type="text")
                 ),
+                vol.Optional(CONF_ASKSAGE_LIVE, default=0): SelectSelector(
+                    SelectSelectorConfig(
+                        options=[
+                            SelectOptionDict(value="0", label="Off"),
+                            SelectOptionDict(value="1", label="Live (Google)"),
+                            SelectOptionDict(value="2", label="Live+ (Google + web crawl)"),
+                        ]
+                    )
+                ),
+                vol.Optional(CONF_ASKSAGE_DEEP_AGENT, default=False): BooleanSelector(),
             }
 
             return self.async_show_form(
@@ -654,6 +674,9 @@ class AiAgentHaOptionsFlowHandler(config_entries.OptionsFlow):
             if "Custom..." not in model_options:
                 model_options = model_options + ["Custom..."]
 
+            current_live = self.config_entry.data.get(CONF_ASKSAGE_LIVE, 0)
+            current_deep_agent = self.config_entry.data.get(CONF_ASKSAGE_DEEP_AGENT, False)
+
             schema_dict = {
                 vol.Required(CONF_ASKSAGE_TOKEN, default=display_token): TextSelector(
                     TextSelectorConfig(type="password")
@@ -664,6 +687,16 @@ class AiAgentHaOptionsFlowHandler(config_entries.OptionsFlow):
                 vol.Optional("custom_model"): TextSelector(
                     TextSelectorConfig(type="text")
                 ),
+                vol.Optional(CONF_ASKSAGE_LIVE, default=current_live): SelectSelector(
+                    SelectSelectorConfig(
+                        options=[
+                            SelectOptionDict(value="0", label="Off"),
+                            SelectOptionDict(value="1", label="Live (Google)"),
+                            SelectOptionDict(value="2", label="Live+ (Google + web crawl)"),
+                        ]
+                    )
+                ),
+                vol.Optional(CONF_ASKSAGE_DEEP_AGENT, default=current_deep_agent): BooleanSelector(),
             }
 
             return self.async_show_form(
