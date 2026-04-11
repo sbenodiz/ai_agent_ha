@@ -1354,7 +1354,7 @@ class AskSageClient(BaseAIClient):
             )
             return json.dumps({
                 "request_type": "final_response",
-                "response": "Ask Sage is temporarily overloaded. Please try again in a moment.",
+                "response": "Ask Sage is temporarily overloaded. It was automatically retried 3 times — if you still see this, please resend your message.",
             })
 
         return self.strip_thinking_tags(str(text))
