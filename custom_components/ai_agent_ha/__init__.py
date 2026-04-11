@@ -362,7 +362,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
         connection.send_message(websocket_api.result_message(msg["id"], providers))
 
-    hass.components.websocket_api.async_register_command(ws_get_providers)
+    websocket_api.async_register_command(hass, ws_get_providers)
 
     # Register services
     hass.services.async_register(DOMAIN, "query", async_handle_query)
