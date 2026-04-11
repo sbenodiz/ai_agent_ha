@@ -159,7 +159,9 @@ class AiAgentHaPanel extends LitElement {
       _isStreaming: { type: Boolean, reflect: false, attribute: false },
       _streamingText: { type: String, reflect: false, attribute: false },
       _dashboardChangeActive: { type: Object, reflect: false, attribute: false },
-      _dashboardChangeText: { type: String, reflect: false, attribute: false }
+      _dashboardChangeText: { type: String, reflect: false, attribute: false },
+      _subscriptionsReady: { type: Boolean, reflect: false, attribute: false },
+      _streamingEnabled: { type: Boolean, reflect: false, attribute: false }
     };
   }
 
@@ -896,6 +898,9 @@ class AiAgentHaPanel extends LitElement {
     this._streamEndUnsub = null;
     this._dashboardChangeActive = null;
     this._dashboardChangeText = '';
+    this._subscriptionsReady = false;
+    this._streamingEnabled = false;
+    this._responseUnsub = null;
     console.debug("AI Agent HA Panel constructor called");
   }
 
@@ -991,22 +996,27 @@ class AiAgentHaPanel extends LitElement {
     console.debug("AI Agent HA Panel connected");
     if (this.hass && !this._eventSubscriptionSetup) {
       this._eventSubscriptionSetup = true;
-      this.hass.connection.subscribeEvents(
-        (event) => this._handleLlamaResponse(event),
-        'ai_agent_ha_response'
-      );
-      console.debug("Event subscription set up in connectedCallback()");
 
-      // Subscribe to streaming events
-      this._streamChunkUnsub = this.hass.connection.subscribeEvents(
-        (event) => this._handleStreamChunk(event),
-        'ai_agent_ha/stream_chunk'
-      );
-      this._streamEndUnsub = this.hass.connection.subscribeEvents(
-        (event) => this._handleStreamEnd(event),
-        'ai_agent_ha/stream_end'
-      );
-      console.debug("Streaming event subscriptions set up");
+      // Await all subscriptions before allowing user interaction
+      try {
+        this._responseUnsub = await this.hass.connection.subscribeEvents(
+          (event) => this._handleLlamaResponse(event),
+          'ai_agent_ha_response'
+        );
+        this._streamChunkUnsub = await this.hass.connection.subscribeEvents(
+          (event) => this._handleStreamChunk(event),
+          'ai_agent_ha/stream_chunk'
+        );
+        this._streamEndUnsub = await this.hass.connection.subscribeEvents(
+          (event) => this._handleStreamEnd(event),
+          'ai_agent_ha/stream_end'
+        );
+        this._subscriptionsReady = true;
+        console.debug("Event subscriptions set up in connectedCallback()");
+      } catch (e) {
+        console.error('Failed to set up event subscriptions:', e);
+        this._subscriptionsReady = true; // allow interaction even if subscription fails
+      }
 
       // Load prompt history from Home Assistant storage
       await this._loadPromptHistory();
@@ -1035,12 +1045,15 @@ class AiAgentHaPanel extends LitElement {
     if (this._logoutHandler) {
       window.removeEventListener('hass-logout', this._logoutHandler);
     }
-    // Clean up streaming subscriptions
+    // Clean up event subscriptions (resolved unsub functions, not Promises)
+    if (this._responseUnsub) {
+      try { this._responseUnsub(); } catch (_) {}
+    }
     if (this._streamChunkUnsub) {
-      try { this._streamChunkUnsub.then(unsub => unsub()); } catch (_) {}
+      try { this._streamChunkUnsub(); } catch (_) {}
     }
     if (this._streamEndUnsub) {
-      try { this._streamEndUnsub.then(unsub => unsub()); } catch (_) {}
+      try { this._streamEndUnsub(); } catch (_) {}
     }
   }
 
@@ -1055,11 +1068,17 @@ class AiAgentHaPanel extends LitElement {
     // Set up event subscription when hass becomes available
     if (changedProps.has('hass') && this.hass && !this._eventSubscriptionSetup) {
       this._eventSubscriptionSetup = true;
-      this.hass.connection.subscribeEvents(
-        (event) => this._handleLlamaResponse(event),
-        'ai_agent_ha_response'
-      );
-      console.debug("Event subscription set up in updated()");
+      try {
+        this._responseUnsub = await this.hass.connection.subscribeEvents(
+          (event) => this._handleLlamaResponse(event),
+          'ai_agent_ha_response'
+        );
+        this._subscriptionsReady = true;
+        console.debug("Event subscription set up in updated()");
+      } catch (e) {
+        console.error('Failed to set up event subscription in updated():', e);
+        this._subscriptionsReady = true;
+      }
     }
 
     // Load providers when hass becomes available
@@ -1102,6 +1121,7 @@ class AiAgentHaPanel extends LitElement {
         if (providers.length > 0) {
           this._availableProviders = providers;
           this._persistenceEnabled = persistenceEnabled;
+          this._streamingEnabled = streamingEnabled;
 
           console.debug("Available AI providers:", this._availableProviders);
           console.debug("Chat persistence enabled:", this._persistenceEnabled);
@@ -1589,6 +1609,16 @@ class AiAgentHaPanel extends LitElement {
     const prompt = promptEl.value.trim();
     if (!prompt || this._isLoading) return;
 
+    // Ensure event subscription is active before sending
+    if (!this._subscriptionsReady) {
+      console.warn('Subscriptions not ready yet, waiting...');
+      let waited = 0;
+      while (!this._subscriptionsReady && waited < 3000) {
+        await new Promise(r => setTimeout(r, 100));
+        waited += 100;
+      }
+    }
+
     console.debug("Sending message:", prompt);
     console.debug("Sending message with provider:", this._selectedProvider);
 
@@ -1609,9 +1639,9 @@ class AiAgentHaPanel extends LitElement {
       clearTimeout(this._serviceCallTimeout);
     }
 
-    // Set timeout to clear loading state after 300 seconds
-    // Increased from 60s to support local models (LM Studio, Ollama) which
-    // may take longer to generate responses on local hardware.
+    // Use shorter timeout for non-streaming cloud providers (Ask Sage, etc.)
+    // Local models may need the full 300s; cloud APIs should respond in <60s
+    const timeoutMs = this._streamingEnabled ? 300000 : 60000;
     this._serviceCallTimeout = setTimeout(() => {
       if (this._isLoading) {
         console.warn("Service call timeout - clearing loading state");
@@ -1623,7 +1653,7 @@ class AiAgentHaPanel extends LitElement {
         }];
         this.requestUpdate();
       }
-    }, 300000); // 300 second timeout (matches backend aiohttp timeout)
+    }, timeoutMs);
 
     try {
       console.debug("Calling ai_agent_ha service");
