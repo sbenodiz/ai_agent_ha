@@ -14,7 +14,7 @@ from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers.typing import ConfigType
 
 from .agent import AiAgentHaAgent
-from .const import DOMAIN
+from .const import AI_PROVIDERS, DOMAIN
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -79,18 +79,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
         provider = config_data["ai_provider"]
 
-        # Validate provider
-        if provider not in [
-            "llama",
-            "openai",
-            "gemini",
-            "openrouter",
-            "anthropic",
-            "alter",
-            "zai",
-            "asksage",
-            "local",
-        ]:
+        # Validate provider — derived from AI_PROVIDERS in const.py so this
+        # check stays in sync automatically whenever a new provider is added.
+        if provider not in AI_PROVIDERS:
             _LOGGER.error("Unknown AI provider: %s", provider)
             raise ConfigEntryNotReady(f"Unknown AI provider: {provider}")
 
