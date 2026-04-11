@@ -586,9 +586,10 @@ class AiAgentHaOptionsFlowHandler(config_entries.OptionsFlow):
                         f"Options flow - Final model config for {provider}: {updated_data['models'].get(provider)}"
                     )
 
-                    # Update the config entry
+                    # Update the config entry, refreshing title if provider changed
+                    new_title = f"AI Agent HA ({PROVIDERS[provider]})"
                     self.hass.config_entries.async_update_entry(
-                        self.config_entry, data=updated_data
+                        self.config_entry, title=new_title, data=updated_data
                     )
 
                     return self.async_create_entry(title="", data={})
