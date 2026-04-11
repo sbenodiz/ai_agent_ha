@@ -21,6 +21,7 @@ from .const import (
     CONF_ASKSAGE_DEEP_AGENT,
     CONF_ASKSAGE_LIVE,
     CONF_ASKSAGE_TOKEN,
+    CONF_ENABLE_STREAMING,
     CONF_LOCAL_MODEL,
     CONF_LOCAL_URL,
     CONF_OPENAI_BASE_URL,
@@ -541,6 +542,11 @@ class AiAgentHaOptionsFlowHandler(config_entries.OptionsFlow):
                         CONF_PERSIST_CHAT_HISTORY, False
                     )
 
+                    # SSE streaming opt-in
+                    updated_data[CONF_ENABLE_STREAMING] = user_input.get(
+                        CONF_ENABLE_STREAMING, False
+                    )
+
                     # For OpenAI, persist custom base URL if provided
                     if provider == "openai":
                         base_url = user_input.get(CONF_OPENAI_BASE_URL, "").strip()
@@ -592,6 +598,7 @@ class AiAgentHaOptionsFlowHandler(config_entries.OptionsFlow):
 
         # Current persistence setting (shared across all provider schemas)
         current_persist = self.config_entry.data.get(CONF_PERSIST_CHAT_HISTORY, False)
+        current_streaming = self.config_entry.data.get(CONF_ENABLE_STREAMING, False)
 
         # Build schema for the selected provider in options
         if provider == "zai":
@@ -616,6 +623,7 @@ class AiAgentHaOptionsFlowHandler(config_entries.OptionsFlow):
                     TextSelectorConfig(type="text")
                 ),
                 vol.Optional(CONF_PERSIST_CHAT_HISTORY, default=current_persist): BooleanSelector(),
+                vol.Optional(CONF_ENABLE_STREAMING, default=current_streaming): BooleanSelector(),
             }
 
             return self.async_show_form(
@@ -649,6 +657,7 @@ class AiAgentHaOptionsFlowHandler(config_entries.OptionsFlow):
                 TextSelectorConfig(type="text")
             )
             schema_dict[vol.Optional(CONF_PERSIST_CHAT_HISTORY, default=current_persist)] = BooleanSelector()
+            schema_dict[vol.Optional(CONF_ENABLE_STREAMING, default=current_streaming)] = BooleanSelector()
 
             return self.async_show_form(
                 step_id="configure_options",
@@ -712,6 +721,7 @@ class AiAgentHaOptionsFlowHandler(config_entries.OptionsFlow):
                 ),
                 vol.Optional(CONF_ASKSAGE_DEEP_AGENT, default=current_deep_agent): BooleanSelector(),
                 vol.Optional(CONF_PERSIST_CHAT_HISTORY, default=current_persist): BooleanSelector(),
+                vol.Optional(CONF_ENABLE_STREAMING, default=current_streaming): BooleanSelector(),
             }
 
             return self.async_show_form(
@@ -753,6 +763,7 @@ class AiAgentHaOptionsFlowHandler(config_entries.OptionsFlow):
             )
 
         schema_dict[vol.Optional(CONF_PERSIST_CHAT_HISTORY, default=current_persist)] = BooleanSelector()
+        schema_dict[vol.Optional(CONF_ENABLE_STREAMING, default=current_streaming)] = BooleanSelector()
 
         return self.async_show_form(
             step_id="configure_options",
