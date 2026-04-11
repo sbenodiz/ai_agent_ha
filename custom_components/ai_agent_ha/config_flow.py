@@ -15,7 +15,7 @@ from homeassistant.helpers.selector import (
     TextSelectorConfig,
 )
 
-from .const import CONF_LOCAL_MODEL, CONF_LOCAL_URL, DOMAIN
+from .const import CONF_LOCAL_MODEL, CONF_LOCAL_URL, CONF_OPENAI_BASE_URL, DOMAIN
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -41,6 +41,8 @@ TOKEN_FIELD_NAMES = {
     "zai_endpoint": "zai_endpoint",
     "local": CONF_LOCAL_URL,  # For local models, we use URL instead of token
 }
+
+OPENAI_BASE_URL_LABEL = "Custom Base URL (optional, e.g. http://192.168.0.57:1234/v1 for LM Studio)"
 
 TOKEN_LABELS = {
     "llama": "Llama API Token",
@@ -218,6 +220,11 @@ class AiAgentHaConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):  # type: ig
                 # Store the configuration data
                 self.config_data[token_field] = token_value
 
+                # For OpenAI, persist optional custom base URL
+                if provider == "openai":
+                    base_url = user_input.get(CONF_OPENAI_BASE_URL, "").strip()
+                    self.config_data[CONF_OPENAI_BASE_URL] = base_url
+
                 # For z.ai, store endpoint type
                 if provider == "zai":
                     endpoint_type = user_input.get("zai_endpoint", "general")
@@ -326,6 +333,12 @@ class AiAgentHaConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):  # type: ig
             ),
         }
 
+        # For OpenAI provider, add optional custom base URL override
+        if provider == "openai":
+            schema_dict[vol.Optional(CONF_OPENAI_BASE_URL, default="")] = TextSelector(
+                TextSelectorConfig(type="url")
+            )
+
         # Add model selection if available
         if available_models:
             # Add predefined models + custom option (avoid duplicating "Custom...")
@@ -422,6 +435,11 @@ class AiAgentHaOptionsFlowHandler(config_entries.OptionsFlow):
                     updated_data = dict(self.config_entry.data)
                     updated_data["ai_provider"] = provider
                     updated_data[token_field] = token_value
+
+                    # For OpenAI, persist custom base URL if provided
+                    if provider == "openai":
+                        base_url = user_input.get(CONF_OPENAI_BASE_URL, "").strip()
+                        updated_data[CONF_OPENAI_BASE_URL] = base_url
 
                     # Update model configuration
                     selected_model = user_input.get("model")
@@ -538,6 +556,13 @@ class AiAgentHaOptionsFlowHandler(config_entries.OptionsFlow):
                 TextSelectorConfig(type="password")
             ),
         }
+
+        # For OpenAI provider, add optional custom base URL override
+        if provider == "openai":
+            current_base_url = self.config_entry.data.get(CONF_OPENAI_BASE_URL, "")
+            schema_dict[vol.Optional(CONF_OPENAI_BASE_URL, default=current_base_url)] = TextSelector(
+                TextSelectorConfig(type="url")
+            )
 
         # Add model selection if available
         if available_models:

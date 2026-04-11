@@ -117,12 +117,29 @@ class LocalClient(BaseAIClient):
     def __init__(self, url, model=""):
         self.url = url
         self.model = model
+        # Detect OpenAI-compatible endpoints (e.g. LM Studio, vLLM, LocalAI)
+        # by checking if the URL contains '/v1'. If so, use the OpenAI chat
+        # completions format instead of the Ollama-native prompt format.
+        self._is_openai_compatible = "/v1" in (url or "")
+        if self._is_openai_compatible:
+            # Ensure the request URL targets /v1/chat/completions
+            self._chat_url = url.rstrip("/")
+            if not self._chat_url.endswith("/chat/completions"):
+                if self._chat_url.endswith("/v1"):
+                    self._chat_url += "/chat/completions"
+                else:
+                    self._chat_url += "/v1/chat/completions"
+            _LOGGER.info(
+                "Detected OpenAI-compatible local endpoint. Chat URL: %s",
+                self._chat_url,
+            )
 
     async def get_response(self, messages, **kwargs):
         _LOGGER.debug(
-            "Making request to local API with model: '%s' at URL: %s",
+            "Making request to local API with model: '%s' at URL: %s (openai_compat=%s)",
             self.model or "[NO MODEL SPECIFIED]",
             self.url,
+            self._is_openai_compatible,
         )
 
         if not self.model:
@@ -131,51 +148,65 @@ class LocalClient(BaseAIClient):
             )
         headers = {"Content-Type": "application/json"}
 
-        # Format user prompt from messages
-        prompt = ""
-        for message in messages:
-            role = message.get("role", "")
-            content = message.get("content", "")
+        # Choose request format based on detected endpoint type
+        if self._is_openai_compatible:
+            # OpenAI-compatible format (LM Studio, vLLM, LocalAI, etc.)
+            # Send structured messages array to /v1/chat/completions
+            payload = {
+                "messages": messages,
+                "stream": False,
+                "temperature": 0.7,
+                "top_p": 0.9,
+            }
+            if self.model:
+                payload["model"] = self.model
+            request_url = self._chat_url
+            _LOGGER.debug(
+                "Using OpenAI-compatible format → POST %s", request_url
+            )
+        else:
+            # Legacy Ollama-native format: flatten messages into a prompt string
+            prompt = ""
+            for message in messages:
+                role = message.get("role", "")
+                content = message.get("content", "")
+                if role == "system":
+                    prompt += f"System: {content}\n\n"
+                elif role == "user":
+                    prompt += f"User: {content}\n\n"
+                elif role == "assistant":
+                    prompt += f"Assistant: {content}\n\n"
+            prompt += "Assistant: "
 
-            # Simple formatting: prefixing each message with its role
-            if role == "system":
-                prompt += f"System: {content}\n\n"
-            elif role == "user":
-                prompt += f"User: {content}\n\n"
-            elif role == "assistant":
-                prompt += f"Assistant: {content}\n\n"
-
-        # Add final prompt prefix for the assistant's response
-        prompt += "Assistant: "
-
-        # Build a generic payload that works with most local API servers
-        payload = {
-            "prompt": prompt,
-            "stream": False,  # Disable streaming to get a single complete response
-            # max_tokens omitted - let local model use its default capacity
-        }
-
-        # Add model if specified
-        if self.model:
-            payload["model"] = self.model
+            payload = {
+                "prompt": prompt,
+                "stream": False,
+            }
+            if self.model:
+                payload["model"] = self.model
+            request_url = self.url
+            _LOGGER.debug(
+                "Using Ollama-native format → POST %s", request_url
+            )
 
         # Note: Payloads don't contain auth tokens (those are in headers), but may contain user prompts
         _LOGGER.debug("Local API request payload: %s", json.dumps(payload, indent=2))
 
-        # Ollama-specific validation
-        if "model" not in payload or not payload["model"]:
-            _LOGGER.warning(
-                "Missing 'model' field in request to local API. This may cause issues with Ollama."
-            )
-        elif self.url and "ollama" in self.url.lower():
-            _LOGGER.debug(
-                "Detected Ollama URL, ensuring model is specified: %s",
-                payload.get("model"),
-            )
+        # Ollama-specific validation (only for non-OpenAI-compatible endpoints)
+        if not self._is_openai_compatible:
+            if "model" not in payload or not payload["model"]:
+                _LOGGER.warning(
+                    "Missing 'model' field in request to local API. This may cause issues with Ollama."
+                )
+            elif self.url and "ollama" in self.url.lower():
+                _LOGGER.debug(
+                    "Detected Ollama URL, ensuring model is specified: %s",
+                    payload.get("model"),
+                )
 
         async with aiohttp.ClientSession() as session:
             async with session.post(
-                self.url,
+                request_url,
                 headers=headers,
                 json=payload,
                 timeout=aiohttp.ClientTimeout(total=300),
@@ -486,10 +517,21 @@ class LlamaClient(BaseAIClient):
 
 
 class OpenAIClient(BaseAIClient):
-    def __init__(self, token, model="gpt-3.5-turbo"):
+    def __init__(self, token, model="gpt-3.5-turbo", base_url=""):
         self.token = token
         self.model = model
-        self.api_url = "https://api.openai.com/v1/chat/completions"
+        # Use custom base URL if provided (e.g. LM Studio at http://192.168.0.57:1234/v1)
+        if base_url and base_url.strip():
+            self.api_url = base_url.rstrip("/") + "/chat/completions"
+            self._custom_endpoint = True
+            _LOGGER.info(
+                "OpenAIClient using custom endpoint: %s (model: %s)",
+                self.api_url,
+                self.model,
+            )
+        else:
+            self.api_url = "https://api.openai.com/v1/chat/completions"
+            self._custom_endpoint = False
 
     def _is_restricted_model(self):
         """Check if the model has restricted parameters (no temperature, top_p, etc.)."""
@@ -502,8 +544,10 @@ class OpenAIClient(BaseAIClient):
     async def get_response(self, messages, **kwargs):
         _LOGGER.debug("Making request to OpenAI API with model: %s", self.model)
 
-        # Validate token
-        if not self.token or not self.token.startswith("sk-"):
+        # Validate token — skip sk- prefix check for custom endpoints (e.g. LM Studio)
+        if not self.token:
+            raise Exception("Invalid OpenAI API key format")
+        if not self._custom_endpoint and not self.token.startswith("sk-"):
             raise Exception("Invalid OpenAI API key format")
 
         headers = {
@@ -1170,7 +1214,8 @@ class AiAgentHaAgent:
         # Initialize the appropriate AI client with model selection
         if provider == "openai":
             model = models_config.get("openai", "gpt-3.5-turbo")
-            self.ai_client = OpenAIClient(config.get("openai_token"), model)
+            base_url = config.get("openai_base_url", "") or ""
+            self.ai_client = OpenAIClient(config.get("openai_token"), model, base_url)
         elif provider == "gemini":
             model = models_config.get("gemini", "gemini-2.5-flash")
             self.ai_client = GeminiClient(config.get("gemini_token"), model)
@@ -1231,6 +1276,10 @@ class AiAgentHaAgent:
         # For local provider, validate URL format
         if provider == "local":
             return bool(token.startswith(("http://", "https://")))
+
+        # For OpenAI with a custom base URL (e.g. LM Studio), skip the length check
+        if provider == "openai" and self.config.get("openai_base_url", "").strip():
+            return len(token) > 0
 
         # Add more specific validation based on your API key format
         return len(token) >= 32
@@ -2693,9 +2742,16 @@ Then restart Home Assistant to see your new dashboard in the sidebar."""
                     )
                 else:
                     # Other clients take (token, model)
-                    self.ai_client = provider_settings["client_class"](
-                        token=token, model=provider_settings["model"]
-                    )
+                    # For OpenAI, also pass optional custom base_url override
+                    if selected_provider == "openai":
+                        base_url = config.get("openai_base_url", "") or ""
+                        self.ai_client = provider_settings["client_class"](
+                            token=token, model=provider_settings["model"], base_url=base_url
+                        )
+                    else:
+                        self.ai_client = provider_settings["client_class"](
+                            token=token, model=provider_settings["model"]
+                        )
                     _LOGGER.debug(
                         f"Initialized {selected_provider} client with model {provider_settings['model']}"
                     )
