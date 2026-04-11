@@ -9,7 +9,7 @@ from homeassistant.components import websocket_api
 from homeassistant.components.frontend import async_register_built_in_panel
 from homeassistant.components.http import StaticPathConfig
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.core import HomeAssistant
+from homeassistant.core import HomeAssistant, SupportsResponse
 from homeassistant.exceptions import ConfigEntryNotReady
 from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers.typing import ConfigType
@@ -504,10 +504,16 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         DOMAIN, "load_prompt_history", async_handle_load_prompt_history
     )
     hass.services.async_register(
-        DOMAIN, "create_dashboard", async_handle_create_dashboard
+        DOMAIN,
+        "create_dashboard",
+        async_handle_create_dashboard,
+        supports_response=SupportsResponse.OPTIONAL,
     )
     hass.services.async_register(
-        DOMAIN, "update_dashboard", async_handle_update_dashboard
+        DOMAIN,
+        "update_dashboard",
+        async_handle_update_dashboard,
+        supports_response=SupportsResponse.OPTIONAL,
     )
 
     # Register static path for frontend
