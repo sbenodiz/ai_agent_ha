@@ -15,7 +15,7 @@ from homeassistant.helpers.selector import (
     TextSelectorConfig,
 )
 
-from .const import CONF_LOCAL_MODEL, CONF_LOCAL_URL, CONF_OPENAI_BASE_URL, DOMAIN
+from .const import CONF_ASKSAGE_TOKEN, CONF_LOCAL_MODEL, CONF_LOCAL_URL, CONF_OPENAI_BASE_URL, DOMAIN
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -28,6 +28,7 @@ PROVIDERS = {
     "alter": "Alter",
     "zai": "z.ai",
     "local": "Local Model",
+    "asksage": "Ask Sage",
 }
 
 TOKEN_FIELD_NAMES = {
@@ -40,6 +41,7 @@ TOKEN_FIELD_NAMES = {
     "zai": "zai_token",
     "zai_endpoint": "zai_endpoint",
     "local": CONF_LOCAL_URL,  # For local models, we use URL instead of token
+    "asksage": CONF_ASKSAGE_TOKEN,
 }
 
 OPENAI_BASE_URL_LABEL = "Custom Base URL (optional, e.g. http://192.168.0.57:1234/v1 for LM Studio)"
@@ -54,6 +56,7 @@ TOKEN_LABELS = {
     "zai": "z.ai API Key",
     "zai_endpoint": "z.ai API Endpoint Type",
     "local": "Local API URL (e.g., http://localhost:11434/api/generate)",
+    "asksage": "Ask Sage API Token",
 }
 
 DEFAULT_MODELS = {
@@ -65,6 +68,7 @@ DEFAULT_MODELS = {
     "alter": "",  # User enters custom model
     "zai": "glm-4.7",  # Z.ai's latest flagship model
     "local": "llama3.2",  # Updated to use llama3.2 as default
+    "asksage": "gpt-4o-mini",  # Sensible default; model list is fetched live from /get-models
 }
 
 AVAILABLE_MODELS = {
@@ -147,6 +151,22 @@ AVAILABLE_MODELS = {
         "mistral",
         "mixtral",
         "deepseek-coder",
+        "Custom...",
+    ],
+    # Ask Sage — baseline list; config flow fetches live models from /get-models,
+    # filtering out any model whose id contains "gov".
+    "asksage": [
+        "gpt-4o-mini",
+        "gpt-4o",
+        "gpt-4-turbo",
+        "gpt-4",
+        "gpt-3.5-turbo",
+        "claude-3-5-sonnet",
+        "claude-3-haiku",
+        "gemini-2.0-flash",
+        "gemini-1.5-pro",
+        "llama-3.1-70b",
+        "mistral-large",
         "Custom...",
     ],
 }
@@ -323,6 +343,62 @@ class AiAgentHaConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):  # type: ig
                 description_placeholders={
                     "token_label": "Local API URL",
                     "provider": PROVIDERS[provider],
+                },
+            )
+
+        if provider == "asksage":
+            # Fetch live model list from Ask Sage /get-models (public endpoint,
+            # no auth required). Filter out any model whose id contains "gov".
+            import aiohttp
+            live_models = []
+            try:
+                async with aiohttp.ClientSession() as session:
+                    async with session.get(
+                        "https://api.asksage.ai/server/get-models",
+                        timeout=aiohttp.ClientTimeout(total=10),
+                    ) as resp:
+                        if resp.status == 200:
+                            data = await resp.json()
+                            raw = data.get("data", [])
+                            live_models = [
+                                m["id"] for m in raw
+                                if isinstance(m, dict)
+                                and "id" in m
+                                and "gov" not in m["id"].lower()
+                            ]
+                            _LOGGER.debug(
+                                "Ask Sage live models fetched: %d (after gov filter)",
+                                len(live_models),
+                            )
+            except Exception as exc:  # noqa: BLE001
+                _LOGGER.warning("Could not fetch Ask Sage model list: %s", exc)
+
+            model_options = live_models if live_models else AVAILABLE_MODELS["asksage"]
+            # Ensure the default is in the list, add Custom... for override
+            if DEFAULT_MODELS["asksage"] not in model_options:
+                model_options = [DEFAULT_MODELS["asksage"]] + model_options
+            if "Custom..." not in model_options:
+                model_options = model_options + ["Custom..."]
+
+            schema_dict = {
+                vol.Required(CONF_ASKSAGE_TOKEN): TextSelector(
+                    TextSelectorConfig(type="password")
+                ),
+                vol.Optional("model", default=DEFAULT_MODELS["asksage"]): SelectSelector(
+                    SelectSelectorConfig(options=model_options)
+                ),
+                vol.Optional("custom_model"): TextSelector(
+                    TextSelectorConfig(type="text")
+                ),
+            }
+
+            return self.async_show_form(
+                step_id="configure",
+                data_schema=vol.Schema(schema_dict),
+                errors=errors,
+                description_placeholders={
+                    "token_label": TOKEN_LABELS["asksage"],
+                    "provider": PROVIDERS["asksage"],
                 },
             )
 
@@ -547,6 +623,56 @@ class AiAgentHaOptionsFlowHandler(config_entries.OptionsFlow):
                 description_placeholders={
                     "token_label": "Local API URL",
                     "provider": PROVIDERS[provider],
+                },
+            )
+
+        if provider == "asksage":
+            # Fetch live model list, filter out gov models
+            import aiohttp
+            live_models = []
+            try:
+                async with aiohttp.ClientSession() as session:
+                    async with session.get(
+                        "https://api.asksage.ai/server/get-models",
+                        timeout=aiohttp.ClientTimeout(total=10),
+                    ) as resp:
+                        if resp.status == 200:
+                            data = await resp.json()
+                            raw = data.get("data", [])
+                            live_models = [
+                                m["id"] for m in raw
+                                if isinstance(m, dict)
+                                and "id" in m
+                                and "gov" not in m["id"].lower()
+                            ]
+            except Exception as exc:  # noqa: BLE001
+                _LOGGER.warning("Could not fetch Ask Sage model list: %s", exc)
+
+            model_options = live_models if live_models else AVAILABLE_MODELS["asksage"]
+            if current_model and current_model not in model_options:
+                model_options = [current_model] + model_options
+            if "Custom..." not in model_options:
+                model_options = model_options + ["Custom..."]
+
+            schema_dict = {
+                vol.Required(CONF_ASKSAGE_TOKEN, default=display_token): TextSelector(
+                    TextSelectorConfig(type="password")
+                ),
+                vol.Optional(
+                    "model", default=current_model or DEFAULT_MODELS["asksage"]
+                ): SelectSelector(SelectSelectorConfig(options=model_options)),
+                vol.Optional("custom_model"): TextSelector(
+                    TextSelectorConfig(type="text")
+                ),
+            }
+
+            return self.async_show_form(
+                step_id="configure_options",
+                data_schema=vol.Schema(schema_dict),
+                errors=errors,
+                description_placeholders={
+                    "token_label": TOKEN_LABELS["asksage"],
+                    "provider": PROVIDERS["asksage"],
                 },
             )
 
