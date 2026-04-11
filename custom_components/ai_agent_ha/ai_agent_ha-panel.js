@@ -82,6 +82,7 @@ const PROVIDERS = {
   anthropic: "Anthropic",
   alter: "Alter",
   zai: "z.ai",
+  asksage: "Ask Sage",
   local: "Local Model",
 };
 
@@ -1808,6 +1809,7 @@ class AiAgentHaPanel extends LitElement {
       "ai agent ha (alter)": "alter",
       "ai agent ha (z.ai)": "zai",
       "ai agent ha (local model)": "local",
+      "ai agent ha (ask sage)": "asksage",
     };
 
     if (entry.title) {
