@@ -1642,6 +1642,9 @@ class AiAgentHaAgent:
             "}\n"
             "IMPORTANT: The above MUST be returned as raw JSON. Do NOT format it as YAML. "
             "Do NOT add markdown fences. The response must start with { and end with }.\n\n"
+            "COMPLETE DASHBOARD EXAMPLE (copy this structure exactly):\n"
+            '{"request_type":"dashboard_suggestion","message":"Here is your irrigation dashboard.","dashboard":{"title":"Irrigation","url_path":"irrigation","icon":"mdi:sprinkler","show_in_sidebar":true,"views":[{"title":"Zones","cards":[{"type":"entities","title":"Zone Controls","entities":["switch.zone_1","switch.zone_2"]},{"type":"gauge","title":"Soil Moisture","entity":"sensor.soil_moisture","min":0,"max":100}]}]}}\n'
+            "^^^ That is the ONLY acceptable format. No YAML. No markdown. No explanation outside JSON.\n\n"
             "For data requests, use this exact JSON format:\n"
             "{\n"
             '  "request_type": "data_request",\n'
@@ -1671,7 +1674,8 @@ class AiAgentHaAgent:
             "- DO NOT include explanations or descriptions outside the JSON\n"
             "- Your entire response must be parseable as JSON\n"
             "- Use the 'message' field inside the JSON for user-facing text\n"
-            "- NEVER mix regular text with JSON in your response\n\n"
+            "- NEVER mix regular text with JSON in your response\n"
+            "- NEVER use YAML format for ANY domain (irrigation, lighting, climate, etc.)\n\n"
             "WRONG: 'I'll create this for you. {\"request_type\": ...}'\n"
             'CORRECT: \'{"request_type": "dashboard_suggestion", "message": "I\'ll create this for you.", ...}\''
         ),
@@ -1766,6 +1770,9 @@ class AiAgentHaAgent:
             "}\n"
             "IMPORTANT: The above MUST be returned as raw JSON. Do NOT format it as YAML. "
             "Do NOT add markdown fences. The response must start with { and end with }.\n\n"
+            "COMPLETE DASHBOARD EXAMPLE (copy this structure exactly):\n"
+            '{"request_type":"dashboard_suggestion","message":"Here is your irrigation dashboard.","dashboard":{"title":"Irrigation","url_path":"irrigation","icon":"mdi:sprinkler","show_in_sidebar":true,"views":[{"title":"Zones","cards":[{"type":"entities","title":"Zone Controls","entities":["switch.zone_1","switch.zone_2"]},{"type":"gauge","title":"Soil Moisture","entity":"sensor.soil_moisture","min":0,"max":100}]}]}}\n'
+            "^^^ That is the ONLY acceptable format. No YAML. No markdown. No explanation outside JSON.\n\n"
             "For data requests, use this exact JSON format:\n"
             "{\n"
             '  "request_type": "data_request",\n'
@@ -1795,7 +1802,8 @@ class AiAgentHaAgent:
             "- DO NOT include explanations or descriptions outside the JSON\n"
             "- Your entire response must be parseable as JSON\n"
             "- Use the 'message' field inside the JSON for user-facing text\n"
-            "- NEVER mix regular text with JSON in your response\n\n"
+            "- NEVER mix regular text with JSON in your response\n"
+            "- NEVER use YAML format for ANY domain (irrigation, lighting, climate, etc.)\n\n"
             "WRONG: 'I'll create this for you. {\"request_type\": ...}'\n"
             'CORRECT: \'{"request_type": "dashboard_suggestion", "message": "I\'ll create this for you.", ...}\''
         ),
@@ -2917,73 +2925,62 @@ class AiAgentHaAgent:
                     return {"error": "Lovelace dashboards not available"}
 
                 # Check if a dashboard with this url_path already exists
-                if url_path in lovelace_data.dashboards:
+                existing_dashboards = lovelace_data.dashboards
+                if url_path in existing_dashboards:
                     return {"error": f"Dashboard '{url_path}' already exists"}
 
-                # Step 1: Create the dashboard entry via the storage API.
-                # Try the async_create_dashboard method first (HA 2024+),
-                # then fall back to alternative internal APIs.
+                # Step 1: Create the dashboard entry via the DashboardsCollection.
+                # In HA 2024+ `lovelace_data.dashboards` is a DashboardsCollection.
+                # We try `.async_create_item()` on it first (the correct HA API),
+                # then fall back to older/internal methods.
                 dashboard_created = False
+                dashboard_entry_config = {
+                    "url_path": url_path,
+                    "title": title,
+                    "icon": icon,
+                    "show_in_sidebar": show_in_sidebar,
+                    "require_admin": require_admin,
+                    "mode": "storage",
+                }
 
-                if hasattr(lovelace_data, "async_create_dashboard"):
-                    await lovelace_data.async_create_dashboard(
-                        {
-                            "url_path": url_path,
-                            "title": title,
-                            "icon": icon,
-                            "show_in_sidebar": show_in_sidebar,
-                            "require_admin": require_admin,
-                            "mode": "storage",
-                        }
-                    )
+                # Primary: DashboardsCollection.async_create_item (HA 2024+)
+                if hasattr(existing_dashboards, "async_create_item"):
+                    await existing_dashboards.async_create_item(dashboard_entry_config)
+                    dashboard_created = True
+                # Fallback 1: lovelace_data level helpers
+                elif hasattr(lovelace_data, "async_create_dashboard"):
+                    await lovelace_data.async_create_dashboard(dashboard_entry_config)
                     dashboard_created = True
                 elif hasattr(lovelace_data, "async_create"):
-                    await lovelace_data.async_create(
-                        {
-                            "url_path": url_path,
-                            "title": title,
-                            "icon": icon,
-                            "show_in_sidebar": show_in_sidebar,
-                            "require_admin": require_admin,
-                            "mode": "storage",
-                        }
-                    )
+                    await lovelace_data.async_create(dashboard_entry_config)
                     dashboard_created = True
                 else:
-                    # Fall back: invoke the WebSocket command handler directly.
-                    # The lovelace/dashboards/create WS handler internally uses
-                    # the lovelace DashboardsCollection.
+                    # Fallback 2: internal dashboards_collection attribute
                     dashboards_collection = getattr(
                         lovelace_data, "dashboards_collection", None
                     )
                     if dashboards_collection is not None and hasattr(
                         dashboards_collection, "async_create_item"
                     ):
-                        await dashboards_collection.async_create_item(
-                            {
-                                "url_path": url_path,
-                                "title": title,
-                                "icon": icon,
-                                "show_in_sidebar": show_in_sidebar,
-                                "require_admin": require_admin,
-                                "mode": "storage",
-                            }
-                        )
+                        await dashboards_collection.async_create_item(dashboard_entry_config)
                         dashboard_created = True
 
                 if not dashboard_created:
                     _LOGGER.warning(
-                        "Lovelace Storage API not found, available attrs: %s",
+                        "Lovelace Storage API not found, available attrs on lovelace_data: %s, "
+                        "available attrs on dashboards: %s",
                         [a for a in dir(lovelace_data) if not a.startswith("_")],
+                        [a for a in dir(existing_dashboards) if not a.startswith("_")],
                     )
                     return {
                         "error": "Lovelace Storage API not available on this HA version. "
                         "Please update Home Assistant to 2024.1 or later."
                     }
 
-                # Step 2: Save the views/cards configuration to the new dashboard
-                dashboards = lovelace_data.dashboards
-                dashboard_store = dashboards.get(url_path)
+                # Step 2: Save the views/cards configuration to the new dashboard.
+                # After creating the entry, re-read dashboards to pick up the new one.
+                dashboards_after = lovelace_data.dashboards
+                dashboard_store = dashboards_after.get(url_path)
                 if dashboard_store is not None:
                     config_to_save = {"views": views}
 
@@ -2992,6 +2989,9 @@ class AiAgentHaAgent:
                         await dashboard_store.async_save(config_to_save)
                     elif hasattr(dashboard_store, "async_save_config"):
                         await dashboard_store.async_save_config(config_to_save)
+                    elif hasattr(dashboard_store, "config") and hasattr(dashboard_store, "async_save"):
+                        dashboard_store.config = config_to_save
+                        await dashboard_store.async_save(None)
                     else:
                         _LOGGER.warning(
                             "Could not save dashboard views — "
@@ -3003,6 +3003,14 @@ class AiAgentHaAgent:
                                 if not a.startswith("_")
                             ],
                         )
+                else:
+                    _LOGGER.warning(
+                        "Dashboard entry '%s' was created but could not be found "
+                        "in lovelace_data.dashboards for saving views. "
+                        "Available keys: %s",
+                        url_path,
+                        list(dashboards_after.keys()) if hasattr(dashboards_after, "keys") else str(dashboards_after),
+                    )
 
                 _LOGGER.info(
                     "Successfully created storage-mode dashboard: %s", url_path
@@ -4172,10 +4180,14 @@ class AiAgentHaAgent:
                             return result
 
                         # Try YAML recovery for dashboard responses before falling back to final_response
-                        yaml_dashboard_indicators = ["title:", "views:", "cards:", "type: custom:", "type: entities"]
+                        yaml_dashboard_indicators = ["title:", "views:", "cards:", "type: custom:", "type: entities", "dashboard:"]
                         if any(indicator in response for indicator in yaml_dashboard_indicators):
                             try:
                                 parsed_yaml = yaml.safe_load(response)
+                                if isinstance(parsed_yaml, dict):
+                                    # Unwrap top-level `dashboard:` key if present
+                                    if "dashboard" in parsed_yaml and isinstance(parsed_yaml["dashboard"], dict):
+                                        parsed_yaml = parsed_yaml["dashboard"]
                                 if isinstance(parsed_yaml, dict) and any(
                                     k in parsed_yaml for k in ["title", "views", "cards"]
                                 ):
