@@ -58,8 +58,21 @@ function extractTemperatureChart(allObjects) {
   return null;
 }
 
+// Legacy key (pre-v1.1.0) — cleared on first opt-in load
 const CHAT_STORAGE_KEY = 'ai_agent_ha_chat_history';
-const CHAT_STORAGE_MAX_MESSAGES = 100;
+
+// v1.1.0 secure persistence — opt-in, per-user, per-provider
+const CHAT_STORAGE_VERSION = 1;
+const CHAT_STORAGE_MAX_MESSAGES = 50;
+
+function chatStorageKey(userId, provider) {
+  return `ai_agent_ha_v1_${userId || 'anon'}_${provider || 'default'}`;
+}
+
+function scrubForStorage(text) {
+  if (!text || typeof text !== 'string') return text;
+  return text.replace(/\b(sk-[A-Za-z0-9]{20,}|[A-Za-z0-9_\-]{32,})\b/g, '[REDACTED]');
+}
 
 const PROVIDERS = {
   openai: "OpenAI",
@@ -95,7 +108,8 @@ class AiAgentHaPanel extends LitElement {
       _dashboardPickerActive: { type: Boolean, reflect: false, attribute: false },
       _existingDashboards: { type: Array, reflect: false, attribute: false },
       _dashboardPickerLoading: { type: Boolean, reflect: false, attribute: false },
-      _activeSuggestionDashboard: { type: Object, reflect: false, attribute: false }
+      _activeSuggestionDashboard: { type: Object, reflect: false, attribute: false },
+      _persistenceEnabled: { type: Boolean, reflect: false, attribute: false }
     };
   }
 
@@ -381,6 +395,11 @@ class AiAgentHaPanel extends LitElement {
         padding: 4px 8px;
         border-radius: 12px;
         background: var(--secondary-background-color, rgba(0,0,0,0.05));
+      }
+      .persistence-indicator {
+        font-size: 0.75rem;
+        opacity: 0.6;
+        cursor: default;
       }
       .thinking-toggle {
         display: flex;
@@ -684,16 +703,18 @@ class AiAgentHaPanel extends LitElement {
     this._existingDashboards = [];
     this._dashboardPickerLoading = false;
     this._activeSuggestionDashboard = null;
+    this._persistenceEnabled = false;
     console.debug("AI Agent HA Panel constructor called");
   }
 
   _loadMessages() {
+    // Legacy loader for backward compat (pre-opt-in). Returns any old messages.
     try {
       const raw = localStorage.getItem(CHAT_STORAGE_KEY);
       if (!raw) return [];
       const parsed = JSON.parse(raw);
       if (!Array.isArray(parsed)) return [];
-      console.debug('AI Agent HA: restored', parsed.length, 'messages from localStorage');
+      console.debug('AI Agent HA: restored', parsed.length, 'messages from legacy localStorage');
       return parsed;
     } catch (e) {
       console.warn('AI Agent HA: failed to load chat history from localStorage:', e);
@@ -702,14 +723,68 @@ class AiAgentHaPanel extends LitElement {
   }
 
   _saveMessages() {
+    // Legacy save (pre-opt-in). Only saves if persistence is NOT enabled (fallback).
+    if (this._persistenceEnabled) return;
     try {
-      // Cap at MAX_MESSAGES to avoid localStorage quota issues
       const toSave = this._messages.length > CHAT_STORAGE_MAX_MESSAGES
         ? this._messages.slice(-CHAT_STORAGE_MAX_MESSAGES)
         : this._messages;
       localStorage.setItem(CHAT_STORAGE_KEY, JSON.stringify(toSave));
     } catch (e) {
       console.warn('AI Agent HA: failed to save chat history to localStorage:', e);
+    }
+  }
+
+  _saveHistoryToStorage() {
+    if (!this._persistenceEnabled) return;
+    if (!this.hass?.user?.id) return;
+    try {
+      const key = chatStorageKey(this.hass.user.id, this._selectedProvider);
+      const toStore = this._messages
+        .filter(m => m.type && m.text)
+        .slice(-CHAT_STORAGE_MAX_MESSAGES)
+        .map(m => ({ type: m.type, text: scrubForStorage(m.text) }));
+      localStorage.setItem(key, JSON.stringify({
+        version: CHAT_STORAGE_VERSION,
+        provider: this._selectedProvider,
+        timestamp: Date.now(),
+        messages: toStore
+      }));
+    } catch (e) {
+      console.warn('AI Agent HA: failed to save chat history:', e);
+    }
+  }
+
+  _loadHistoryFromStorage() {
+    if (!this._persistenceEnabled) return;
+    if (!this.hass?.user?.id) return;
+    try {
+      const key = chatStorageKey(this.hass.user.id, this._selectedProvider);
+      const raw = localStorage.getItem(key);
+      if (!raw) return;
+      const stored = JSON.parse(raw);
+      if (stored.version !== CHAT_STORAGE_VERSION) {
+        localStorage.removeItem(key);
+        return;
+      }
+      const sevenDays = 7 * 24 * 60 * 60 * 1000;
+      if (stored.provider !== this._selectedProvider) return;
+      if (Date.now() - stored.timestamp > sevenDays) {
+        localStorage.removeItem(key);
+        return;
+      }
+      if (stored.messages && stored.messages.length > 0) {
+        this._messages = stored.messages;
+        // Clear legacy storage now that we have opt-in persistence
+        try { localStorage.removeItem(CHAT_STORAGE_KEY); } catch (_) {}
+        this.requestUpdate();
+      }
+    } catch (e) {
+      console.warn('AI Agent HA: failed to load chat history:', e);
+      try {
+        const key = chatStorageKey(this.hass.user.id, this._selectedProvider);
+        localStorage.removeItem(key);
+      } catch (_) {}
     }
   }
 
@@ -733,12 +808,29 @@ class AiAgentHaPanel extends LitElement {
       await this._loadPromptHistory();
     }
 
+    // Clear all ai_agent_ha storage on HA logout
+    this._logoutHandler = () => {
+      try {
+        Object.keys(localStorage)
+          .filter(k => k.startsWith('ai_agent_ha_v1_'))
+          .forEach(k => localStorage.removeItem(k));
+      } catch (e) {}
+    };
+    window.addEventListener('hass-logout', this._logoutHandler);
+
     // Close dropdown when clicking outside
     document.addEventListener('click', (e) => {
       if (!this.shadowRoot.querySelector('.provider-selector')?.contains(e.target)) {
         this._showProviderDropdown = false;
       }
     });
+  }
+
+  disconnectedCallback() {
+    super.disconnectedCallback();
+    if (this._logoutHandler) {
+      window.removeEventListener('hass-logout', this._logoutHandler);
+    }
   }
 
   async updated(changedProps) {
@@ -790,13 +882,25 @@ class AiAgentHaPanel extends LitElement {
 
           this._availableProviders = providers;
 
+          // Check persistence setting from config entries
+          const persistEntry = aiAgentEntries.find(e =>
+            (e.options?.persist_chat_history || e.data?.persist_chat_history)
+          );
+          this._persistenceEnabled = !!(persistEntry?.options?.persist_chat_history || persistEntry?.data?.persist_chat_history);
+
           console.debug("Available AI providers (mapped from data/title):", this._availableProviders);
+          console.debug("Chat persistence enabled:", this._persistenceEnabled);
 
           if (
             (!this._selectedProvider || !providers.find(p => p.value === this._selectedProvider)) &&
             providers.length > 0
           ) {
             this._selectedProvider = providers[0].value;
+          }
+
+          // Load persisted history if enabled
+          if (this._persistenceEnabled) {
+            this._loadHistoryFromStorage();
           }
         } else {
           console.debug("No 'ai_agent_ha' config entries found via WebSocket.");
@@ -1157,7 +1261,8 @@ class AiAgentHaPanel extends LitElement {
                   const p = this._availableProviders.find(p => p.value === this._selectedProvider);
                   const providerLabel = p ? p.label : (this._selectedProvider || 'No provider configured');
                   const modelLabel = p?.model ? ` \u00b7 ${p.model}` : '';
-                  return html`<span class="provider-label">${providerLabel}${modelLabel}</span>`;
+                  return html`<span class="provider-label">${providerLabel}${modelLabel}</span>
+                    ${this._persistenceEnabled ? html`<span class="persistence-indicator" title="Chat history is saved locally">\u{1F4BE}</span>` : ''}`;
                 })()}
               </div>
               <label class="thinking-toggle">
@@ -1345,6 +1450,7 @@ class AiAgentHaPanel extends LitElement {
 
       console.debug("Adding message to UI:", message);
       this._messages = [...this._messages, message];
+      this._saveHistoryToStorage();
     } else {
       this._error = event.data.error || 'An error occurred';
       this._messages = [
@@ -1522,7 +1628,8 @@ class AiAgentHaPanel extends LitElement {
            changedProps.has('_showProviderDropdown') ||
            changedProps.has('_dashboardPickerActive') ||
            changedProps.has('_existingDashboards') ||
-           changedProps.has('_dashboardPickerLoading');
+           changedProps.has('_dashboardPickerLoading') ||
+           changedProps.has('_persistenceEnabled');
   }
 
   _clearChat() {
@@ -1531,9 +1638,12 @@ class AiAgentHaPanel extends LitElement {
     this._error = null;
     this._pendingAutomation = null;
     this._debugInfo = null;
-    // Clear persisted chat history
+    // Clear persisted chat history (both legacy and new)
     try {
       localStorage.removeItem(CHAT_STORAGE_KEY);
+      if (this._persistenceEnabled) {
+        localStorage.removeItem(chatStorageKey(this.hass?.user?.id, this._selectedProvider));
+      }
       console.debug('AI Agent HA: cleared chat history from localStorage');
     } catch (e) {
       console.warn('AI Agent HA: failed to clear chat history from localStorage:', e);
