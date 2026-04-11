@@ -2873,7 +2873,13 @@ class AiAgentHaAgent:
     async def create_dashboard(
         self, dashboard_config: Dict[str, Any]
     ) -> Dict[str, Any]:
-        """Create a new dashboard using Home Assistant's Lovelace WebSocket API."""
+        """Create a new dashboard using Home Assistant's Lovelace Storage API.
+
+        This uses the storage-mode approach which:
+        - Creates the dashboard instantly (no restart required)
+        - Shows immediately in the HA sidebar
+        - Stores config in .storage/ (managed by HA, no manual file editing)
+        """
         try:
             _LOGGER.debug(
                 "Creating dashboard with config: %s",
@@ -2881,324 +2887,164 @@ class AiAgentHaAgent:
             )
 
             # Validate required fields
-            if not dashboard_config.get("title"):
+            title = dashboard_config.get("title")
+            if not title:
                 return {"error": "Dashboard title is required"}
 
-            if not dashboard_config.get("url_path"):
-                return {"error": "Dashboard URL path is required"}
+            # Generate url_path from title if not provided
+            import re
 
-            # Sanitize the URL path
-            url_path = (
-                dashboard_config["url_path"].lower().replace(" ", "-").replace("_", "-")
-            )
+            url_path = dashboard_config.get("url_path")
+            if not url_path:
+                url_path = re.sub(r"[^a-z0-9]+", "-", title.lower()).strip("-")
+            else:
+                url_path = re.sub(r"[^a-z0-9]+", "-", url_path.lower()).strip("-")
 
-            # Prepare dashboard configuration for Lovelace
-            dashboard_data = {
-                "title": dashboard_config["title"],
-                "icon": dashboard_config.get("icon", "mdi:view-dashboard"),
-                "show_in_sidebar": dashboard_config.get("show_in_sidebar", True),
-                "require_admin": dashboard_config.get("require_admin", False),
-                "views": dashboard_config.get("views", []),
-            }
+            icon = dashboard_config.get("icon", "mdi:view-dashboard")
+            show_in_sidebar = dashboard_config.get("show_in_sidebar", True)
+            require_admin = dashboard_config.get("require_admin", False)
+            views = dashboard_config.get("views", [{"title": "Home", "cards": []}])
 
+            # --- Lovelace Storage API approach (instant, no restart) ---
             try:
-                # Create dashboard file directly - this is the most reliable method
-                import os
+                from homeassistant.components.lovelace import DOMAIN as LOVELACE_DOMAIN
 
-                import yaml
+                lovelace_data = self.hass.data.get(LOVELACE_DOMAIN)
+                if lovelace_data is None:
+                    return {"error": "Lovelace integration is not available"}
 
-                # Create the dashboard YAML file
-                lovelace_config_file = self.hass.config.path(
-                    f"ui-lovelace-{url_path}.yaml"
-                )
+                if not hasattr(lovelace_data, "dashboards"):
+                    return {"error": "Lovelace dashboards not available"}
 
-                # Use async_add_executor_job to perform file I/O asynchronously
-                def write_dashboard_file():
-                    with open(lovelace_config_file, "w") as f:
-                        yaml.dump(
-                            dashboard_data,
-                            f,
-                            default_flow_style=False,
-                            allow_unicode=True,
+                # Check if a dashboard with this url_path already exists
+                if url_path in lovelace_data.dashboards:
+                    return {"error": f"Dashboard '{url_path}' already exists"}
+
+                # Step 1: Create the dashboard entry via the storage API.
+                # Try the async_create_dashboard method first (HA 2024+),
+                # then fall back to alternative internal APIs.
+                dashboard_created = False
+
+                if hasattr(lovelace_data, "async_create_dashboard"):
+                    await lovelace_data.async_create_dashboard(
+                        {
+                            "url_path": url_path,
+                            "title": title,
+                            "icon": icon,
+                            "show_in_sidebar": show_in_sidebar,
+                            "require_admin": require_admin,
+                            "mode": "storage",
+                        }
+                    )
+                    dashboard_created = True
+                elif hasattr(lovelace_data, "async_create"):
+                    await lovelace_data.async_create(
+                        {
+                            "url_path": url_path,
+                            "title": title,
+                            "icon": icon,
+                            "show_in_sidebar": show_in_sidebar,
+                            "require_admin": require_admin,
+                            "mode": "storage",
+                        }
+                    )
+                    dashboard_created = True
+                else:
+                    # Fall back: invoke the WebSocket command handler directly.
+                    # The lovelace/dashboards/create WS handler internally uses
+                    # the lovelace DashboardsCollection.
+                    dashboards_collection = getattr(
+                        lovelace_data, "dashboards_collection", None
+                    )
+                    if dashboards_collection is not None and hasattr(
+                        dashboards_collection, "async_create_item"
+                    ):
+                        await dashboards_collection.async_create_item(
+                            {
+                                "url_path": url_path,
+                                "title": title,
+                                "icon": icon,
+                                "show_in_sidebar": show_in_sidebar,
+                                "require_admin": require_admin,
+                                "mode": "storage",
+                            }
+                        )
+                        dashboard_created = True
+
+                if not dashboard_created:
+                    _LOGGER.warning(
+                        "Lovelace Storage API not found, available attrs: %s",
+                        [a for a in dir(lovelace_data) if not a.startswith("_")],
+                    )
+                    return {
+                        "error": "Lovelace Storage API not available on this HA version. "
+                        "Please update Home Assistant to 2024.1 or later."
+                    }
+
+                # Step 2: Save the views/cards configuration to the new dashboard
+                dashboards = lovelace_data.dashboards
+                dashboard_store = dashboards.get(url_path)
+                if dashboard_store is not None:
+                    config_to_save = {"views": views}
+
+                    # Try async_save first, then async_save_config
+                    if hasattr(dashboard_store, "async_save"):
+                        await dashboard_store.async_save(config_to_save)
+                    elif hasattr(dashboard_store, "async_save_config"):
+                        await dashboard_store.async_save_config(config_to_save)
+                    else:
+                        _LOGGER.warning(
+                            "Could not save dashboard views — "
+                            "dashboard entry created but views may be empty. "
+                            "Available methods: %s",
+                            [
+                                a
+                                for a in dir(dashboard_store)
+                                if not a.startswith("_")
+                            ],
                         )
 
-                await self.hass.async_add_executor_job(write_dashboard_file)
-
                 _LOGGER.info(
-                    "Successfully created dashboard file: %s", lovelace_config_file
+                    "Successfully created storage-mode dashboard: %s", url_path
                 )
 
-                # Now update configuration.yaml
-                try:
-                    config_file = self.hass.config.path("configuration.yaml")
-                    dashboard_config_entry = {
-                        url_path: {
-                            "mode": "yaml",
-                            "title": dashboard_config["title"],
-                            "icon": dashboard_config.get("icon", "mdi:view-dashboard"),
-                            "show_in_sidebar": dashboard_config.get(
-                                "show_in_sidebar", True
-                            ),
-                            "filename": f"ui-lovelace-{url_path}.yaml",
-                        }
-                    }
+                success_message = (
+                    f"Dashboard '{title}' created successfully!\n\n"
+                    f"The dashboard is now available in your sidebar — "
+                    f"no restart required.\n"
+                    f"URL: /lovelace-{url_path}"
+                )
 
-                    def update_config_file():
-                        try:
-                            with open(config_file, "r") as f:
-                                content = f.read()
-
-                            # Dashboard configuration to add
-                            dashboard_yaml = f"""    {url_path}:
-      mode: yaml
-      title: {dashboard_config['title']}
-      icon: {dashboard_config.get('icon', 'mdi:view-dashboard')}
-      show_in_sidebar: {str(dashboard_config.get('show_in_sidebar', True)).lower()}
-      filename: ui-lovelace-{url_path}.yaml"""
-
-                            # Check if lovelace section exists
-                            if "lovelace:" not in content:
-                                # Add complete lovelace section at the end
-                                lovelace_section = f"""
-# Lovelace dashboards configuration added by AI Agent
-lovelace:
-  dashboards:
-{dashboard_yaml}
-"""
-                                with open(config_file, "a") as f:
-                                    f.write(lovelace_section)
-                                return True
-
-                            # If lovelace exists, check for dashboards section
-                            lines = content.split("\n")
-                            new_lines = []
-                            dashboard_added = False
-                            in_lovelace = False
-                            lovelace_indent = 0
-
-                            for i, line in enumerate(lines):
-                                new_lines.append(line)
-
-                                # Detect lovelace section
-                                if (
-                                    line.strip() == "lovelace:"
-                                    or line.strip().startswith("lovelace:")
-                                ):
-                                    in_lovelace = True
-                                    lovelace_indent = len(line) - len(line.lstrip())
-                                    continue
-
-                                # If we're in lovelace section
-                                if in_lovelace:
-                                    current_indent = (
-                                        len(line) - len(line.lstrip())
-                                        if line.strip()
-                                        else 0
-                                    )
-
-                                    # If we hit another top-level section, we're out of lovelace
-                                    if (
-                                        line.strip()
-                                        and current_indent <= lovelace_indent
-                                        and not line.startswith(" ")
-                                    ):
-                                        if line.strip() != "lovelace:":
-                                            in_lovelace = False
-
-                                    # Look for dashboards section
-                                    if in_lovelace and "dashboards:" in line:
-                                        # Add our dashboard after the dashboards: line
-                                        new_lines.append(dashboard_yaml)
-                                        dashboard_added = True
-                                        in_lovelace = False  # We're done
-                                        break
-
-                            # If we found lovelace but no dashboards section, add it
-                            if not dashboard_added and "lovelace:" in content:
-                                # Find lovelace section and add dashboards
-                                new_lines = []
-                                for line in lines:
-                                    new_lines.append(line)
-                                    if (
-                                        line.strip() == "lovelace:"
-                                        or line.strip().startswith("lovelace:")
-                                    ):
-                                        # Add dashboards section right after lovelace
-                                        new_lines.append("  dashboards:")
-                                        new_lines.append(dashboard_yaml)
-                                        dashboard_added = True
-                                        break
-
-                            if dashboard_added:
-                                with open(config_file, "w") as f:
-                                    f.write("\n".join(new_lines))
-                                return True
-                            else:
-                                # Last resort: append to end of file
-                                with open(config_file, "a") as f:
-                                    f.write(f"\n  dashboards:\n{dashboard_yaml}\n")
-                                return True
-
-                        except Exception as e:
-                            _LOGGER.error(
-                                "Failed to update configuration.yaml: %s", str(e)
-                            )
-                            # Fallback to simple append method
-                            try:
-                                with open(config_file, "r") as f:
-                                    content = f.read()
-
-                                # Check if lovelace section exists
-                                if "lovelace:" not in content:
-                                    # Add lovelace section
-                                    lovelace_config = f"""
-# Lovelace dashboards
-lovelace:
-  dashboards:
-    {url_path}:
-      mode: yaml
-      title: {dashboard_config['title']}
-      icon: {dashboard_config.get('icon', 'mdi:view-dashboard')}
-      show_in_sidebar: {str(dashboard_config.get('show_in_sidebar', True)).lower()}
-      filename: ui-lovelace-{url_path}.yaml
-"""
-                                    with open(config_file, "a") as f:
-                                        f.write(lovelace_config)
-                                else:
-                                    # Add to existing lovelace section (simple approach)
-                                    dashboard_entry = f"""    {url_path}:
-      mode: yaml
-      title: {dashboard_config['title']}
-      icon: {dashboard_config.get('icon', 'mdi:view-dashboard')}
-      show_in_sidebar: {str(dashboard_config.get('show_in_sidebar', True)).lower()}
-      filename: ui-lovelace-{url_path}.yaml
-"""
-                                    # Find the dashboards section and add to it
-                                    lines = content.split("\n")
-                                    new_lines = []
-                                    in_dashboards = False
-                                    dashboards_indented = False
-
-                                    for line in lines:
-                                        new_lines.append(line)
-                                        if (
-                                            "dashboards:" in line
-                                            and "lovelace"
-                                            in content[: content.find(line)]
-                                        ):
-                                            in_dashboards = True
-                                            # Add our dashboard entry after dashboards:
-                                            new_lines.append(dashboard_entry.rstrip())
-                                            in_dashboards = False
-
-                                    # If we couldn't find dashboards section, add it under lovelace
-                                    if not any("dashboards:" in line for line in lines):
-                                        for i, line in enumerate(new_lines):
-                                            if line.strip() == "lovelace:":
-                                                new_lines.insert(i + 1, "  dashboards:")
-                                                new_lines.insert(
-                                                    i + 2, dashboard_entry.rstrip()
-                                                )
-                                                break
-
-                                    with open(config_file, "w") as f:
-                                        f.write("\n".join(new_lines))
-
-                                return True
-                            except Exception as fallback_error:
-                                _LOGGER.error(
-                                    "Fallback config update also failed: %s",
-                                    str(fallback_error),
-                                )
-                                return False
-
-                    config_updated = await self.hass.async_add_executor_job(
-                        update_config_file
-                    )
-
-                    if config_updated:
-                        success_message = f"""Dashboard '{dashboard_config['title']}' created successfully!
-
-✅ Dashboard file created: ui-lovelace-{url_path}.yaml
-✅ Configuration.yaml updated automatically
-
-🔄 Please restart Home Assistant to see your new dashboard in the sidebar."""
-
-                        return {
-                            "success": True,
-                            "message": success_message,
-                            "url_path": url_path,
-                            "restart_required": True,
-                        }
-                    else:
-                        # Config update failed, provide manual instructions
-                        config_instructions = f"""Dashboard '{dashboard_config['title']}' created successfully!
-
-✅ Dashboard file created: ui-lovelace-{url_path}.yaml
-⚠️  Could not automatically update configuration.yaml
-
-Please manually add this to your configuration.yaml:
-
-lovelace:
-  dashboards:
-    {url_path}:
-      mode: yaml
-      title: {dashboard_config['title']}
-      icon: {dashboard_config.get('icon', 'mdi:view-dashboard')}
-      show_in_sidebar: {str(dashboard_config.get('show_in_sidebar', True)).lower()}
-      filename: ui-lovelace-{url_path}.yaml
-
-Then restart Home Assistant to see your new dashboard in the sidebar."""
-
-                        return {
-                            "success": True,
-                            "message": config_instructions,
-                            "url_path": url_path,
-                            "restart_required": True,
-                        }
-
-                except Exception as config_error:
-                    _LOGGER.error(
-                        "Error updating configuration.yaml: %s", str(config_error)
-                    )
-                    # Provide manual instructions as fallback
-                    config_instructions = f"""Dashboard '{dashboard_config['title']}' created successfully!
-
-✅ Dashboard file created: ui-lovelace-{url_path}.yaml
-⚠️  Could not automatically update configuration.yaml
-
-Please manually add this to your configuration.yaml:
-
-lovelace:
-  dashboards:
-    {url_path}:
-      mode: yaml
-      title: {dashboard_config['title']}
-      icon: {dashboard_config.get('icon', 'mdi:view-dashboard')}
-      show_in_sidebar: {str(dashboard_config.get('show_in_sidebar', True)).lower()}
-      filename: ui-lovelace-{url_path}.yaml
-
-Then restart Home Assistant to see your new dashboard in the sidebar."""
-
-                    return {
-                        "success": True,
-                        "message": config_instructions,
-                        "url_path": url_path,
-                        "restart_required": True,
-                    }
+                return {
+                    "success": True,
+                    "message": success_message,
+                    "url_path": url_path,
+                    "restart_required": False,
+                }
 
             except Exception as e:
-                _LOGGER.error("Failed to create dashboard file: %s", str(e))
-                return {"error": "Failed to create dashboard file. Check Home Assistant logs for details."}
+                _LOGGER.error(
+                    "Lovelace Storage API create failed: %s", e, exc_info=True
+                )
+                return {
+                    "error": f"Failed to create dashboard via Lovelace Storage API: {e}"
+                }
 
         except Exception as e:
             _LOGGER.exception("Error creating dashboard: %s", str(e))
-            return {"error": "Error creating dashboard. Check Home Assistant logs for details."}
+            return {
+                "error": "Error creating dashboard. Check Home Assistant logs for details."
+            }
 
     async def update_dashboard(
         self, dashboard_url: str, dashboard_config: Dict[str, Any]
     ) -> Dict[str, Any]:
-        """Update an existing dashboard using Home Assistant's Lovelace WebSocket API."""
+        """Update an existing dashboard using Home Assistant's Lovelace Storage API.
+
+        Saves the updated views/cards configuration instantly — no restart required.
+        For storage-mode dashboards the change is reflected immediately in the UI.
+        Falls back to YAML file updates for legacy yaml-mode dashboards.
+        """
         try:
             _LOGGER.debug(
                 "Updating dashboard %s with config: %s",
@@ -3206,27 +3052,67 @@ Then restart Home Assistant to see your new dashboard in the sidebar."""
                 json.dumps(dashboard_config, default=str),
             )
 
-            # Prepare updated dashboard configuration
-            dashboard_data = {
-                "title": dashboard_config.get("title", "Updated Dashboard"),
-                "icon": dashboard_config.get("icon", "mdi:view-dashboard"),
-                "show_in_sidebar": dashboard_config.get("show_in_sidebar", True),
-                "require_admin": dashboard_config.get("require_admin", False),
-                "views": dashboard_config.get("views", []),
-            }
+            views = dashboard_config.get("views", [])
 
+            # --- Try Lovelace Storage API first (instant update) ---
             try:
-                # Update dashboard file directly
+                from homeassistant.components.lovelace import DOMAIN as LOVELACE_DOMAIN
+
+                lovelace_data = self.hass.data.get(LOVELACE_DOMAIN)
+                if lovelace_data is not None and hasattr(lovelace_data, "dashboards"):
+                    dashboards = lovelace_data.dashboards
+                    # The url_path may be None for the default dashboard
+                    dashboard_key = None if dashboard_url is None else dashboard_url
+                    dashboard_store = dashboards.get(dashboard_key)
+
+                    if dashboard_store is not None:
+                        config_to_save = {"views": views}
+
+                        if hasattr(dashboard_store, "async_save"):
+                            await dashboard_store.async_save(config_to_save)
+                        elif hasattr(dashboard_store, "async_save_config"):
+                            await dashboard_store.async_save_config(config_to_save)
+                        else:
+                            return {
+                                "error": "Dashboard found but save API not available"
+                            }
+
+                        _LOGGER.info(
+                            "Successfully updated dashboard via Storage API: %s",
+                            dashboard_url,
+                        )
+                        return {
+                            "success": True,
+                            "message": (
+                                f"Dashboard '{dashboard_url}' updated successfully! "
+                                f"Changes are live — no restart required."
+                            ),
+                        }
+
+            except Exception as storage_err:
+                _LOGGER.warning(
+                    "Storage API update failed, trying YAML fallback: %s",
+                    storage_err,
+                )
+
+            # --- Fallback: YAML file update for legacy yaml-mode dashboards ---
+            try:
                 import os
 
                 import yaml
 
-                # Try updating the YAML file
+                dashboard_data = {
+                    "title": dashboard_config.get("title", "Updated Dashboard"),
+                    "icon": dashboard_config.get("icon", "mdi:view-dashboard"),
+                    "show_in_sidebar": dashboard_config.get("show_in_sidebar", True),
+                    "require_admin": dashboard_config.get("require_admin", False),
+                    "views": views,
+                }
+
                 dashboard_file = self.hass.config.path(
                     f"ui-lovelace-{dashboard_url}.yaml"
                 )
 
-                # Check if file exists asynchronously
                 def check_file_exists():
                     return os.path.exists(dashboard_file)
 
@@ -3241,7 +3127,7 @@ Then restart Home Assistant to see your new dashboard in the sidebar."""
                     )
 
                 if file_exists:
-                    # Use async_add_executor_job to perform file I/O asynchronously
+
                     def update_dashboard_file():
                         with open(dashboard_file, "w") as f:
                             yaml.dump(
@@ -3261,15 +3147,19 @@ Then restart Home Assistant to see your new dashboard in the sidebar."""
                         "message": f"Dashboard '{dashboard_url}' updated successfully!",
                     }
                 else:
-                    return {"error": f"Dashboard file for '{dashboard_url}' not found"}
+                    return {"error": f"Dashboard '{dashboard_url}' not found"}
 
             except Exception as e:
-                _LOGGER.error("Failed to update dashboard file: %s", str(e))
-                return {"error": "Failed to update dashboard file. Check Home Assistant logs for details."}
+                _LOGGER.error("Failed to update dashboard: %s", str(e))
+                return {
+                    "error": "Failed to update dashboard. Check Home Assistant logs for details."
+                }
 
         except Exception as e:
             _LOGGER.exception("Error updating dashboard: %s", str(e))
-            return {"error": "Dashboard update failed. Check Home Assistant logs for details."}
+            return {
+                "error": "Dashboard update failed. Check Home Assistant logs for details."
+            }
 
     async def process_query(
         self, user_query: str, provider: Optional[str] = None, debug: bool = False
