@@ -3307,49 +3307,49 @@ Then restart Home Assistant to see your new dashboard in the sidebar."""
 
             provider_config = {
                 "openai": {
-                    "token_key": "openai_token",
+                    "token_key": "openai_token",  # nosec B105
                     "model": models_config.get("openai", "gpt-3.5-turbo"),
                     "client_class": OpenAIClient,
                 },
                 "gemini": {
-                    "token_key": "gemini_token",
+                    "token_key": "gemini_token",  # nosec B105
                     "model": models_config.get("gemini", "gemini-1.5-flash"),
                     "client_class": GeminiClient,
                 },
                 "openrouter": {
-                    "token_key": "openrouter_token",
+                    "token_key": "openrouter_token",  # nosec B105
                     "model": models_config.get("openrouter", "openai/gpt-4o"),
                     "client_class": OpenRouterClient,
                 },
                 "llama": {
-                    "token_key": "llama_token",
+                    "token_key": "llama_token",  # nosec B105
                     "model": models_config.get(
                         "llama", "Llama-4-Maverick-17B-128E-Instruct-FP8"
                     ),
                     "client_class": LlamaClient,
                 },
                 "anthropic": {
-                    "token_key": "anthropic_token",
+                    "token_key": "anthropic_token",  # nosec B105
                     "model": models_config.get("anthropic", "claude-opus-4-6"),
                     "client_class": AnthropicClient,
                 },
                 "alter": {
-                    "token_key": "alter_token",
+                    "token_key": "alter_token",  # nosec B105
                     "model": models_config.get("alter", ""),
                     "client_class": AlterClient,
                 },
                 "zai": {
-                    "token_key": "zai_token",
+                    "token_key": "zai_token",  # nosec B105
                     "model": models_config.get("zai", ""),
                     "client_class": ZaiClient,
                 },
                 "local": {
-                    "token_key": "local_url",
+                    "token_key": "local_url",  # nosec B105
                     "model": models_config.get("local", ""),
                     "client_class": LocalClient,
                 },
                 "asksage": {
-                    "token_key": "asksage_token",
+                    "token_key": "asksage_token",  # nosec B105
                     "model": models_config.get("asksage", "gpt-4o-mini"),
                     "client_class": AskSageClient,
                 },
@@ -4555,7 +4555,7 @@ Then restart Home Assistant to see your new dashboard in the sidebar."""
                             "text": partial_text,
                         },
                     )
-                except Exception:
+                except Exception:  # nosec B110
                     pass  # Don't fail the stream for WS errors
 
             full_text = "".join(accumulated)
@@ -4572,7 +4572,7 @@ Then restart Home Assistant to see your new dashboard in the sidebar."""
                         "type": "stream_end",
                     },
                 )
-            except Exception:
+            except Exception:  # nosec B110
                 pass
 
             return full_text
