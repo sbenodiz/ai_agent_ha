@@ -129,15 +129,21 @@ class BaseAIClient:
             The response with all thinking blocks removed and whitespace cleaned up.
         """
         import re
+
         if not text:
             return text
         # Remove <think>...</think> blocks (case-insensitive, dotall)
-        text = re.sub(r'<think>.*?</think>', '', text, flags=re.DOTALL | re.IGNORECASE)
+        text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL | re.IGNORECASE)
         # Remove <|thinking|>...</|thinking|> variant
-        text = re.sub(r'<\|thinking\|>.*?</\|thinking\|>', '', text, flags=re.DOTALL | re.IGNORECASE)
+        text = re.sub(
+            r"<\|thinking\|>.*?</\|thinking\|>",
+            "",
+            text,
+            flags=re.DOTALL | re.IGNORECASE,
+        )
         # Handle truncated blocks: remove everything from an unclosed <think> to end of string
-        text = re.sub(r'<think>.*$', '', text, flags=re.DOTALL | re.IGNORECASE)
-        text = re.sub(r'<\|thinking\|>.*$', '', text, flags=re.DOTALL | re.IGNORECASE)
+        text = re.sub(r"<think>.*$", "", text, flags=re.DOTALL | re.IGNORECASE)
+        text = re.sub(r"<\|thinking\|>.*$", "", text, flags=re.DOTALL | re.IGNORECASE)
         # Clean up leading/trailing whitespace left behind
         return text.strip()
 
@@ -190,9 +196,7 @@ class LocalClient(BaseAIClient):
             if self.model:
                 payload["model"] = self.model
             request_url = self._chat_url
-            _LOGGER.debug(
-                "Using OpenAI-compatible format → POST %s", request_url
-            )
+            _LOGGER.debug("Using OpenAI-compatible format → POST %s", request_url)
         else:
             # Legacy Ollama-native format: flatten messages into a prompt string
             prompt = ""
@@ -214,9 +218,7 @@ class LocalClient(BaseAIClient):
             if self.model:
                 payload["model"] = self.model
             request_url = self.url
-            _LOGGER.debug(
-                "Using Ollama-native format → POST %s", request_url
-            )
+            _LOGGER.debug("Using Ollama-native format → POST %s", request_url)
 
         # Note: Payloads don't contain auth tokens (those are in headers), but may contain user prompts
         _LOGGER.debug("Local API request payload: %s", json.dumps(payload, indent=2))
@@ -280,7 +282,9 @@ class LocalClient(BaseAIClient):
                         # Try common response formats
                         # Ollama format - return only the response text
                         if "response" in data:
-                            response_content = self.strip_thinking_tags(data["response"])
+                            response_content = self.strip_thinking_tags(
+                                data["response"]
+                            )
                             _LOGGER.debug(
                                 "Extracted response content: %s",
                                 (
@@ -363,7 +367,9 @@ class LocalClient(BaseAIClient):
                         elif "choices" in data and len(data["choices"]) > 0:
                             choice = data["choices"][0]
                             if "message" in choice and "content" in choice["message"]:
-                                content = self.strip_thinking_tags(choice["message"]["content"])
+                                content = self.strip_thinking_tags(
+                                    choice["message"]["content"]
+                                )
                             elif "text" in choice:
                                 content = self.strip_thinking_tags(choice["text"])
                             else:
@@ -458,7 +464,9 @@ class LocalClient(BaseAIClient):
                                 isinstance(message_content, dict)
                                 and "content" in message_content
                             ):
-                                content = self.strip_thinking_tags(message_content["content"])
+                                content = self.strip_thinking_tags(
+                                    message_content["content"]
+                                )
                             else:
                                 content = self.strip_thinking_tags(str(message_content))
                             return json.dumps(
@@ -832,7 +840,9 @@ class AnthropicClient(BaseAIClient):
                     # Get the text from the first content block
                     for block in content_blocks:
                         if block.get("type") == "text":
-                            return self.strip_thinking_tags(block.get("text", str(data)))
+                            return self.strip_thinking_tags(
+                                block.get("text", str(data))
+                            )
                 return str(data)
 
 
@@ -883,7 +893,9 @@ class OpenRouterClient(BaseAIClient):
                     )
                     return str(data)
                 if choices and "message" in choices[0]:
-                    return self.strip_thinking_tags(choices[0]["message"].get("content", str(data)))
+                    return self.strip_thinking_tags(
+                        choices[0]["message"].get("content", str(data))
+                    )
                 return str(data)
 
 
@@ -927,7 +939,9 @@ class AlterClient(BaseAIClient):
                     _LOGGER.debug("Full Alter response: %s", json.dumps(data, indent=2))
                     return str(data)
                 if choices and "message" in choices[0]:
-                    return self.strip_thinking_tags(choices[0]["message"].get("content", str(data)))
+                    return self.strip_thinking_tags(
+                        choices[0]["message"].get("content", str(data))
+                    )
                 return str(data)
 
 
@@ -981,7 +995,9 @@ class ZaiClient(BaseAIClient):
                     _LOGGER.debug("Full z.ai response: %s", json.dumps(data, indent=2))
                     return str(data)
                 if choices and "message" in choices[0]:
-                    return self.strip_thinking_tags(choices[0]["message"].get("content", str(data)))
+                    return self.strip_thinking_tags(
+                        choices[0]["message"].get("content", str(data))
+                    )
                 return str(data)
 
 
@@ -2783,7 +2799,9 @@ Then restart Home Assistant to see your new dashboard in the sidebar."""
                     if selected_provider == "openai":
                         base_url = config.get("openai_base_url", "") or ""
                         self.ai_client = provider_settings["client_class"](
-                            token=token, model=provider_settings["model"], base_url=base_url
+                            token=token,
+                            model=provider_settings["model"],
+                            base_url=base_url,
                         )
                     else:
                         self.ai_client = provider_settings["client_class"](
@@ -2831,7 +2849,10 @@ Then restart Home Assistant to see your new dashboard in the sidebar."""
             # preventing a failed query from poisoning the next call.
             history_rollback_index = len(self.conversation_history)
             self.conversation_history.append({"role": "user", "content": user_query})
-            _LOGGER.debug("Added user query to conversation history (rollback index=%d)", history_rollback_index)
+            _LOGGER.debug(
+                "Added user query to conversation history (rollback index=%d)",
+                history_rollback_index,
+            )
 
             max_iterations = 5  # Prevent infinite loops
             iteration = 0
@@ -3489,7 +3510,9 @@ Then restart Home Assistant to see your new dashboard in the sidebar."""
                                 }
                             )
                             # Roll back history and do not cache — let the user retry fresh.
-                            self.conversation_history = self.conversation_history[:history_rollback_index]
+                            self.conversation_history = self.conversation_history[
+                                :history_rollback_index
+                            ]
                             return result
 
                         # If response is not valid JSON, try to wrap it as a final response
@@ -3530,15 +3553,22 @@ Then restart Home Assistant to see your new dashboard in the sidebar."""
                         if result.get("success", False):
                             self._set_cached_data(cache_key, result)
                         else:
-                            self.conversation_history = self.conversation_history[:history_rollback_index]
+                            self.conversation_history = self.conversation_history[
+                                :history_rollback_index
+                            ]
                         return result
 
                 except Exception as e:
                     _LOGGER.exception("Error processing AI response: %s", str(e))
                     # Roll back conversation history to before this query so the
                     # failed prompt doesn't contaminate the next call.
-                    self.conversation_history = self.conversation_history[:history_rollback_index]
-                    _LOGGER.debug("Rolled back conversation history to index %d after error", history_rollback_index)
+                    self.conversation_history = self.conversation_history[
+                        :history_rollback_index
+                    ]
+                    _LOGGER.debug(
+                        "Rolled back conversation history to index %d after error",
+                        history_rollback_index,
+                    )
                     # Do NOT cache error results — let the next identical query retry fresh.
                     return _with_debug(
                         {
@@ -3550,8 +3580,13 @@ Then restart Home Assistant to see your new dashboard in the sidebar."""
             # If we've reached max iterations without a final response
             _LOGGER.warning("Reached maximum iterations without final response")
             # Roll back history — the query loop ran but never settled on a final response.
-            self.conversation_history = self.conversation_history[:history_rollback_index]
-            _LOGGER.debug("Rolled back conversation history to index %d after max iterations", history_rollback_index)
+            self.conversation_history = self.conversation_history[
+                :history_rollback_index
+            ]
+            _LOGGER.debug(
+                "Rolled back conversation history to index %d after max iterations",
+                history_rollback_index,
+            )
             result = {
                 "success": False,
                 "error": "Maximum iterations reached without final response",
@@ -3564,8 +3599,13 @@ Then restart Home Assistant to see your new dashboard in the sidebar."""
             _LOGGER.exception("Error in process_query: %s", str(e))
             # Roll back if history_rollback_index was set before the exception.
             try:
-                self.conversation_history = self.conversation_history[:history_rollback_index]
-                _LOGGER.debug("Rolled back conversation history to index %d after outer exception", history_rollback_index)
+                self.conversation_history = self.conversation_history[
+                    :history_rollback_index
+                ]
+                _LOGGER.debug(
+                    "Rolled back conversation history to index %d after outer exception",
+                    history_rollback_index,
+                )
             except NameError:
                 pass  # Exception occurred before history_rollback_index was set
             return _with_debug(
