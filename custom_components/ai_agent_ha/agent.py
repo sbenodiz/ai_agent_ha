@@ -3738,6 +3738,72 @@ Then restart Home Assistant to see your new dashboard in the sidebar."""
                             else:
                                 request_type = response_data.get("request_type")
                             parameters = response_data.get("parameters", {})
+
+                            # Normalise model-invented aliases to canonical request types
+                            _REQUEST_TYPE_ALIASES = {
+                                "get_temperature_sensors": "get_entities_by_device_class",
+                                "get_humidity_sensors": "get_entities_by_device_class",
+                                "get_motion_sensors": "get_entities_by_device_class",
+                                "get_sensor_states": "get_entities_by_domain",
+                                "get_sensors": "get_entities_by_domain",
+                                "get_lights": "get_entities_by_domain",
+                                "get_switches": "get_entities_by_domain",
+                                "get_all_entities": "get_entities",
+                                "get_entity": "get_entity_state",
+                                "get_state": "get_entity_state",
+                                "get_weather": "get_weather_data",
+                                "get_forecast": "get_weather_data",
+                                "get_climate": "get_climate_related_entities",
+                                "get_climate_entities": "get_climate_related_entities",
+                            }
+                            if request_type in _REQUEST_TYPE_ALIASES:
+                                canonical = _REQUEST_TYPE_ALIASES[request_type]
+                                _LOGGER.debug(
+                                    "Normalising request_type alias %r -> %r",
+                                    request_type,
+                                    canonical,
+                                )
+                                # Inject device_class/domain from the alias if not set
+                                if (
+                                    request_type in ("get_temperature_sensors",)
+                                    and "device_class" not in parameters
+                                ):
+                                    parameters = {
+                                        **parameters,
+                                        "device_class": "temperature",
+                                    }
+                                elif (
+                                    request_type in ("get_humidity_sensors",)
+                                    and "device_class" not in parameters
+                                ):
+                                    parameters = {
+                                        **parameters,
+                                        "device_class": "humidity",
+                                    }
+                                elif (
+                                    request_type in ("get_motion_sensors",)
+                                    and "device_class" not in parameters
+                                ):
+                                    parameters = {
+                                        **parameters,
+                                        "device_class": "motion",
+                                    }
+                                elif (
+                                    request_type in ("get_sensor_states", "get_sensors")
+                                    and "domain" not in parameters
+                                ):
+                                    parameters = {**parameters, "domain": "sensor"}
+                                elif (
+                                    request_type in ("get_lights",)
+                                    and "domain" not in parameters
+                                ):
+                                    parameters = {**parameters, "domain": "light"}
+                                elif (
+                                    request_type in ("get_switches",)
+                                    and "domain" not in parameters
+                                ):
+                                    parameters = {**parameters, "domain": "switch"}
+                                request_type = canonical
                             _LOGGER.debug(
                                 "Processing data request: %s with parameters: %s",
                                 request_type,
@@ -3833,12 +3899,29 @@ Then restart Home Assistant to see your new dashboard in the sidebar."""
                                     parameters.get("dashboard_config"),
                                 )
                             else:
-                                data = {
-                                    "error": f"Unknown request type: {request_type}"
-                                }
+                                # Unknown request type — tell the model and let it retry
                                 _LOGGER.warning(
-                                    "Unknown request type: %s", request_type
+                                    "Unknown request type from model: %r — feeding error back for retry",
+                                    request_type,
                                 )
+                                self.conversation_history.append(
+                                    {
+                                        "role": "tool",
+                                        "content": json.dumps(
+                                            {
+                                                "error": f"Unknown request type: {request_type!r}. "
+                                                "Use one of: get_entity_state, get_entities_by_device_class, "
+                                                "get_entities_by_domain, get_climate_related_entities, "
+                                                "get_weather_data, get_entities, get_entity_registry, "
+                                                "get_area_registry, get_history, get_statistics, "
+                                                "get_automations, get_scenes, get_dashboards, "
+                                                "create_automation, create_dashboard, update_dashboard, "
+                                                "call_service, final_response."
+                                            }
+                                        ),
+                                    }
+                                )
+                                continue  # retry loop with error context
 
                             # Check if any data request resulted in an error
                             if isinstance(data, dict) and "error" in data:
