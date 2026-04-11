@@ -550,32 +550,43 @@ class AiAgentHaPanel extends LitElement {
         overflow-y: auto;
         border: 1px solid var(--divider-color);
       }
-      .dashboard-suggestion {
+      .dashboard-suggestion-card {
         margin-top: 12px;
-        padding: 14px 16px;
-        background: var(--card-background-color, rgba(255,255,255,0.05));
-        border: 1px solid var(--divider-color, rgba(255,255,255,0.12));
-        border-radius: 12px;
+        width: 100%;
+        box-sizing: border-box;
+      }
+      .dashboard-suggestion-card .card-header {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        padding: 16px 16px 0;
+        font-size: 1rem;
+        font-weight: 600;
+        color: var(--primary-text-color);
+      }
+      .dashboard-suggestion-card .card-header-icon {
+        color: var(--primary-color);
+        --mdc-icon-size: 22px;
+      }
+      .dashboard-suggestion-card .card-content {
+        padding: 12px 16px;
         display: flex;
         flex-direction: column;
         gap: 8px;
       }
-      .dashboard-title {
-        font-size: 1rem;
-        font-weight: 600;
-        color: var(--primary-text-color);
+      .dashboard-chips {
         display: flex;
-        align-items: center;
-        gap: 8px;
+        flex-wrap: wrap;
+        gap: 6px;
       }
-      .dashboard-description {
-        font-size: 0.8rem;
-        color: var(--secondary-text-color, rgba(255,255,255,0.5));
+      .dashboard-meta {
+        font-size: 0.78rem;
+        color: var(--secondary-text-color);
       }
-      .dashboard-actions {
+      .dashboard-suggestion-card .card-actions {
         display: flex;
         gap: 8px;
-        margin-top: 4px;
+        padding: 8px 16px 16px;
       }
       .no-providers {
         color: var(--error-color);
@@ -999,17 +1010,29 @@ class AiAgentHaPanel extends LitElement {
                   </div>
                 ` : ''}
                 ${msg.dashboard ? html`
-                  <div class="dashboard-suggestion">
-                    <div class="dashboard-title">
-                      <ha-icon icon="${msg.dashboard.icon || 'mdi:view-dashboard'}"></ha-icon>
-                      ${msg.dashboard.title || 'New Dashboard'}
+                  <ha-card class="dashboard-suggestion-card">
+                    <div class="card-header">
+                      <ha-icon icon="${msg.dashboard.icon || 'mdi:view-dashboard'}" class="card-header-icon"></ha-icon>
+                      <span>${msg.dashboard.title || 'New Dashboard'}</span>
                     </div>
-                    <div class="dashboard-description">${(() => {
-                      const views = msg.dashboard.views || [];
-                      const totalCards = views.reduce((sum, v) => sum + (v.cards ? v.cards.length : 0), 0);
-                      return `${views.length} view${views.length !== 1 ? 's' : ''} \u00b7 ${totalCards} card${totalCards !== 1 ? 's' : ''}`;
-                    })()}</div>
-                    <div class="dashboard-actions">
+                    <div class="card-content">
+                      <div class="dashboard-chips">
+                        ${(msg.dashboard.views || []).map(view => html`
+                          <ha-chip>
+                            <ha-icon slot="icon" icon="${view.icon || 'mdi:tab'}"></ha-icon>
+                            ${view.title || 'View'}
+                          </ha-chip>
+                        `)}
+                      </div>
+                      <div class="dashboard-meta">
+                        ${(() => {
+                          const views = msg.dashboard.views || [];
+                          const totalCards = views.reduce((sum, v) => sum + (v.cards ? v.cards.length : 0), 0);
+                          return `${views.length} view${views.length !== 1 ? 's' : ''} \u00b7 ${totalCards} card${totalCards !== 1 ? 's' : ''}`;
+                        })()}
+                      </div>
+                    </div>
+                    <div class="card-actions">
                       <ha-button
                         @click=${() => this._approveDashboard(msg.dashboard)}
                         .disabled=${this._isLoading}
@@ -1019,7 +1042,7 @@ class AiAgentHaPanel extends LitElement {
                         .disabled=${this._isLoading}
                       >Cancel</ha-button>
                     </div>
-                  </div>
+                  </ha-card>
                 ` : ''}
               </div>
             `)}
