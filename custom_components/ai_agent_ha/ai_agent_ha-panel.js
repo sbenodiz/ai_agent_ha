@@ -1347,7 +1347,7 @@ class AiAgentHaPanel extends LitElement {
                     <div class="thinking-content-inner">${msg.thinking}</div>
                   </details>
                 ` : ''}
-                ${msg.text}
+                ${msg.text && !(msg.dashboard && msg.text.trim().startsWith('{')) ? msg.text : ''}
                 ${this._renderTempChart(msg.chartData)}
                 ${msg.automation ? html`
                   <div class="automation-suggestion">
@@ -1664,7 +1664,7 @@ class AiAgentHaPanel extends LitElement {
         return;
       }
 
-      let message = { type: 'assistant', text: event.data.answer };
+      let message = { type: 'assistant', text: event.data.answer, _rawAnswer: event.data.answer };
 
       // Capture thinking content from response
       if (event.data.thinking) {
@@ -1703,6 +1703,11 @@ class AiAgentHaPanel extends LitElement {
         }
       } catch (e) {
         console.debug("Response parsing error:", e);
+      }
+
+      // Safety: if dashboard was found but text still looks like raw JSON, replace it
+      if (message.dashboard && message.text && message.text.trim().startsWith('{')) {
+        message.text = 'I created a dashboard for you. Review it below.';
       }
 
       console.debug("Adding message to UI:", message);
