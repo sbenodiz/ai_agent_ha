@@ -42,7 +42,9 @@ TOKEN_FIELD_NAMES = {
     "local": CONF_LOCAL_URL,  # For local models, we use URL instead of token
 }
 
-OPENAI_BASE_URL_LABEL = "Custom Base URL (optional, e.g. http://192.168.0.57:1234/v1 for LM Studio)"
+OPENAI_BASE_URL_LABEL = (
+    "Custom Base URL (optional, e.g. http://192.168.0.57:1234/v1 for LM Studio)"
+)
 
 TOKEN_LABELS = {
     "llama": "Llama API Token",
@@ -560,9 +562,9 @@ class AiAgentHaOptionsFlowHandler(config_entries.OptionsFlow):
         # For OpenAI provider, add optional custom base URL override
         if provider == "openai":
             current_base_url = self.config_entry.data.get(CONF_OPENAI_BASE_URL, "")
-            schema_dict[vol.Optional(CONF_OPENAI_BASE_URL, default=current_base_url)] = TextSelector(
-                TextSelectorConfig(type="url")
-            )
+            schema_dict[
+                vol.Optional(CONF_OPENAI_BASE_URL, default=current_base_url)
+            ] = TextSelector(TextSelectorConfig(type="url"))
 
         # Add model selection if available
         if available_models:
