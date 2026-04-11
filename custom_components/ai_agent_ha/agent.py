@@ -1040,6 +1040,22 @@ class ZaiClient(BaseAIClient):
                 return str(data)
 
 
+# --- Ask Sage retry helpers ---
+_ASK_SAGE_MAX_RETRIES = 3
+_ASK_SAGE_RETRY_DELAYS = [1, 2, 4]  # seconds (exponential backoff)
+
+
+def _is_overload_response(text: str) -> bool:
+    """Return True if Ask Sage returned a transient overload/rate-limit message."""
+    lowered = text.lower()
+    return (
+        "overloaded" in lowered
+        or "try again" in lowered
+        or "rate limit" in lowered
+        or "too many requests" in lowered
+    )
+
+
 class AskSageClient(BaseAIClient):
     """Client for the Ask Sage Server API.
 
@@ -1260,50 +1276,88 @@ class AskSageClient(BaseAIClient):
                 payload["system_prompt"] = system_content
             _LOGGER.debug("Ask Sage: routing to Deep Agent endpoint")
 
-        async with self._session() as session:
-            async with session.post(
-                endpoint_url,
-                headers=headers,
-                json=payload,
-                timeout=aiohttp.ClientTimeout(total=300),
-            ) as resp:
-                if resp.status == 401:
-                    raise Exception("Ask Sage API error 401: invalid or expired token")
-                if resp.status != 200:
-                    error_text = await resp.text()
-                    _LOGGER.error(
-                        "Ask Sage API error %d: %s", resp.status, error_text
+        last_text = ""
+        for attempt in range(_ASK_SAGE_MAX_RETRIES):
+            async with self._session() as session:
+                async with session.post(
+                    endpoint_url,
+                    headers=headers,
+                    json=payload,
+                    timeout=aiohttp.ClientTimeout(total=300),
+                ) as resp:
+                    if resp.status == 401:
+                        raise Exception("Ask Sage API error 401: invalid or expired token")
+                    if resp.status in (429, 503):
+                        error_text = await resp.text()
+                        if attempt < _ASK_SAGE_MAX_RETRIES - 1:
+                            delay = _ASK_SAGE_RETRY_DELAYS[attempt]
+                            _LOGGER.warning(
+                                "Ask Sage HTTP %d (attempt %d/%d), retrying in %ds",
+                                resp.status, attempt + 1, _ASK_SAGE_MAX_RETRIES, delay,
+                            )
+                            await asyncio.sleep(delay)
+                            continue
+                        raise Exception(
+                            f"Ask Sage API error {resp.status}: service unavailable after {_ASK_SAGE_MAX_RETRIES} attempts"
+                        )
+                    if resp.status != 200:
+                        error_text = await resp.text()
+                        _LOGGER.error(
+                            "Ask Sage API error %d: %s", resp.status, error_text
+                        )
+                        raise Exception(f"Ask Sage API error {resp.status}: {error_text[:200]}")
+
+                    data = await resp.json()
+                    _LOGGER.debug(
+                        "Ask Sage raw response keys: %s", list(data.keys())
                     )
-                    raise Exception(f"Ask Sage API error {resp.status}: {error_text[:200]}")
 
-                data = await resp.json()
-                _LOGGER.debug(
-                    "Ask Sage raw response keys: %s", list(data.keys())
-                )
-
-                if self.deep_agent:
-                    # Deep Agent response: {execution_status, response: {response: "..."}, ...}
-                    inner = data.get("response", {})
-                    if isinstance(inner, dict):
-                        text = inner.get("response", "") or inner.get("message", "")
+                    if self.deep_agent:
+                        # Deep Agent response: {execution_status, response: {response: "..."}, ...}
+                        inner = data.get("response", {})
+                        if isinstance(inner, dict):
+                            text = inner.get("response", "") or inner.get("message", "")
+                        else:
+                            text = str(inner)
+                        if not text:
+                            text = data.get("message", "")
                     else:
-                        text = str(inner)
-                    if not text:
+                        # Standard /query CompletionResponse: generated text is in `message`.
                         text = data.get("message", "")
-                else:
-                    # Standard /query CompletionResponse: generated text is in `message`.
-                    text = data.get("message", "")
+                        if not text:
+                            # Fallback: some error states surface in `response`
+                            text = data.get("response", "")
                     if not text:
-                        # Fallback: some error states surface in `response`
-                        text = data.get("response", "")
-                if not text:
-                    _LOGGER.warning(
-                        "Ask Sage returned empty message. Full response: %s",
-                        json.dumps(data, default=str)[:500],
-                    )
-                    return str(data)
+                        _LOGGER.warning(
+                            "Ask Sage returned empty message. Full response: %s",
+                            json.dumps(data, default=str)[:500],
+                        )
+                        return str(data)
 
-                return self.strip_thinking_tags(str(text))
+            # Check for overload response before returning
+            if not _is_overload_response(text):
+                break  # good response, exit loop
+
+            last_text = text
+            if attempt < _ASK_SAGE_MAX_RETRIES - 1:
+                delay = _ASK_SAGE_RETRY_DELAYS[attempt]
+                _LOGGER.warning(
+                    "Ask Sage overload response (attempt %d/%d), retrying in %ds: %s",
+                    attempt + 1, _ASK_SAGE_MAX_RETRIES, delay, text[:100],
+                )
+                await asyncio.sleep(delay)
+        else:
+            # All retries exhausted — return friendly message
+            _LOGGER.error(
+                "Ask Sage overload after %d attempts. Last response: %s",
+                _ASK_SAGE_MAX_RETRIES, last_text[:200],
+            )
+            return json.dumps({
+                "request_type": "final_response",
+                "response": "Ask Sage is temporarily overloaded. Please try again in a moment.",
+            })
+
+        return self.strip_thinking_tags(str(text))
 
 
 # === Main Agent ===
