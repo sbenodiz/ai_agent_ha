@@ -15,6 +15,7 @@ CONF_ZAI_TOKEN = "zai_token"  # nosec B105
 CONF_LOCAL_URL = "local_url"
 CONF_LOCAL_MODEL = "local_model"
 CONF_OPENAI_BASE_URL = "openai_base_url"  # Optional custom endpoint for OpenAI-compatible servers
+CONF_ASKSAGE_TOKEN = "asksage_token"  # nosec B105
 
 # Available AI providers
 AI_PROVIDERS = [
@@ -26,6 +27,7 @@ AI_PROVIDERS = [
     "alter",
     "zai",
     "local",
+    "asksage",
 ]
 
 # AI Provider constants
