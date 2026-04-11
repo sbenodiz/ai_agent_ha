@@ -679,6 +679,10 @@ class GeminiClient(BaseAIClient):
                     )
             elif role == "user":
                 gemini_contents.append({"role": "user", "parts": [{"text": content}]})
+            elif role == "tool":
+                # Gemini doesn't support role='tool' in basic contents API;
+                # map HA data-injection turns to 'user' role.
+                gemini_contents.append({"role": "user", "parts": [{"text": content}]})
             elif role == "assistant":
                 gemini_contents.append({"role": "model", "parts": [{"text": content}]})
 
@@ -789,6 +793,10 @@ class AnthropicClient(BaseAIClient):
                 # Anthropic uses a separate system parameter
                 system_message = content
             elif role == "user":
+                anthropic_messages.append({"role": "user", "content": content})
+            elif role == "tool":
+                # Anthropic doesn't support role='tool' in basic messages API;
+                # map HA data-injection turns to 'user' role.
                 anthropic_messages.append({"role": "user", "content": content})
             elif role == "assistant":
                 anthropic_messages.append({"role": "assistant", "content": content})
@@ -3093,10 +3101,15 @@ Then restart Home Assistant to see your new dashboard in the sidebar."""
                                 json.dumps(data, default=str),
                             )
 
-                            # Add data to conversation as a user message (not system to avoid overwriting system prompt in Anthropic API)
+                            # Add data to conversation as a tool message.
+                            # Using role='tool' (not 'user') keeps HA data injections
+                            # semantically distinct from real human queries, preventing
+                            # LM Studio / Jinja prompt templates from failing with
+                            # "No user query found in messages" when the 10-message
+                            # context window fills up with data-fetch turns.
                             self.conversation_history.append(
                                 {
-                                    "role": "user",
+                                    "role": "tool",
                                     "content": json.dumps({"data": data}, default=str),
                                 }
                             )
@@ -3212,10 +3225,10 @@ Then restart Home Assistant to see your new dashboard in the sidebar."""
                                 len(data) if isinstance(data, list) else 1,
                             )
 
-                            # Add data to conversation as a user message (not system to avoid overwriting system prompt in Anthropic API)
+                            # Add data to conversation as a tool message (see above).
                             self.conversation_history.append(
                                 {
-                                    "role": "user",
+                                    "role": "tool",
                                     "content": json.dumps({"data": data}, default=str),
                                 }
                             )
@@ -3357,10 +3370,10 @@ Then restart Home Assistant to see your new dashboard in the sidebar."""
                                 json.dumps(data, default=str),
                             )
 
-                            # Add data to conversation as a user message (not system to avoid overwriting system prompt in Anthropic API)
+                            # Add data to conversation as a tool message (see above).
                             self.conversation_history.append(
                                 {
-                                    "role": "user",
+                                    "role": "tool",
                                     "content": json.dumps({"data": data}, default=str),
                                 }
                             )
