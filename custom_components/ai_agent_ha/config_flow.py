@@ -358,7 +358,7 @@ class AiAgentHaConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):  # type: ig
                 data_schema=vol.Schema(schema_dict),
                 errors=errors,
                 description_placeholders={
-                    "token_label": "Local API URL",
+                    "token_label": "Local API URL",  # nosec B105
                     "provider": PROVIDERS[provider],
                 },
             )
@@ -679,7 +679,7 @@ class AiAgentHaOptionsFlowHandler(config_entries.OptionsFlow):
                 data_schema=vol.Schema(schema_dict),
                 errors=errors,
                 description_placeholders={
-                    "token_label": "Local API URL",
+                    "token_label": "Local API URL",  # nosec B105
                     "provider": PROVIDERS[provider],
                 },
             )
