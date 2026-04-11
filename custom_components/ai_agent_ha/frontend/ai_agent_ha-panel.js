@@ -1048,8 +1048,8 @@ class AiAgentHaPanel extends LitElement {
                 ${this._renderTempChart(msg.chartData)}
                 ${msg.automation ? html`
                   <div class="automation-suggestion">
-                    <div class="automation-title">${msg.automation.alias}</div>
-                    <div class="automation-description">${msg.automation.description}</div>
+                    <div class="automation-title">${msg.automation.alias || msg.automation.id || 'New Automation'}</div>
+                    <div class="automation-description">${msg.automation.description || (msg.automation.trigger?.[0] ? `Trigger: ${JSON.stringify(msg.automation.trigger[0])}` : 'Review the automation below')}</div>
                     <div class="automation-details">
                       ${JSON.stringify(msg.automation, null, 2)}
                     </div>
