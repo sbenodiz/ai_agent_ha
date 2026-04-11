@@ -1,6 +1,7 @@
 import {
   LitElement,
   html,
+  svg,
   css,
 } from "https://unpkg.com/lit-element@2.4.0/lit-element.js?module";
 
@@ -8,8 +9,8 @@ console.log("AI Agent HA Panel loading..."); // Debug log
 
 // Try to find the actionable JSON object in a potentially multi-JSON response.
 // The model often emits several data objects followed by the final response object.
-// We scan all top-level JSON objects and return the last one with a request_type.
-function extractActionableJson(text) {
+// We scan all top-level JSON objects and return both the actionable one and the full list.
+function extractAllJson(text) {
   const objects = [];
   let depth = 0;
   let start = -1;
@@ -28,9 +29,33 @@ function extractActionableJson(text) {
       }
     }
   }
-  // Prefer last object with a known request_type
   const actionable = [...objects].reverse().find(o => o.request_type);
-  return actionable || objects[objects.length - 1] || null;
+  return { actionable: actionable || objects[objects.length - 1] || null, all: objects };
+}
+
+function extractTemperatureChart(allObjects) {
+  for (const obj of allObjects) {
+    if (!obj.data || !Array.isArray(obj.data)) continue;
+    const tempEntities = obj.data.filter(e =>
+      e.attributes?.device_class === 'temperature' ||
+      e.entity_id?.includes('temperature') ||
+      e.friendly_name?.toLowerCase().includes('temperature')
+    );
+    if (tempEntities.length >= 2) {
+      return tempEntities
+        .filter(e => e.state && !isNaN(parseFloat(e.state)))
+        .map(e => ({
+          label: (e.friendly_name || e.entity_id)
+            .replace(/ temperature$/i, '')
+            .replace(/sensor\./i, ''),
+          value: parseFloat(e.state),
+          unit: e.attributes?.unit_of_measurement || '°F',
+          isOutdoor: !e.area_id || e.friendly_name?.toLowerCase().includes('outdoor') || e.entity_id?.includes('outdoor')
+        }))
+        .sort((a, b) => b.isOutdoor - a.isOutdoor);
+    }
+  }
+  return null;
 }
 
 const CHAT_STORAGE_KEY = 'ai_agent_ha_chat_history';
@@ -283,6 +308,10 @@ class AiAgentHaPanel extends LitElement {
         background: var(--secondary-background-color);
         margin-right: auto;
         border-bottom-left-radius: 4px;
+      }
+      .chart-container {
+        margin-top: 8px;
+        overflow-x: auto;
       }
       .input-container {
         position: relative;
@@ -990,6 +1019,7 @@ class AiAgentHaPanel extends LitElement {
             ${this._messages.map(msg => html`
               <div class="message ${msg.type}-message">
                 ${msg.text}
+                ${this._renderTempChart(msg.chartData)}
                 ${msg.automation ? html`
                   <div class="automation-suggestion">
                     <div class="automation-title">${msg.automation.alias}</div>
@@ -1237,8 +1267,14 @@ class AiAgentHaPanel extends LitElement {
       // Check if the response contains an automation or dashboard suggestion
       try {
         console.debug("Attempting to parse response:", event.data.answer?.substring(0, 200));
-        const response = extractActionableJson(event.data.answer || '');
+        const { actionable: response, all: allObjects } = extractAllJson(event.data.answer || '');
         console.debug("Extracted actionable JSON:", response);
+
+        // Detect temperature chart data from intermediate data objects
+        const tempReadings = extractTemperatureChart(allObjects);
+        if (tempReadings) {
+          message.chartData = { type: 'temperature', readings: tempReadings };
+        }
 
         if (response) {
           if (response.request_type === 'automation_suggestion') {
@@ -1257,10 +1293,8 @@ class AiAgentHaPanel extends LitElement {
             message.text = response.response;
           }
         }
-        // If no actionable JSON found, keep original event.data.answer as message.text
       } catch (e) {
         console.debug("Response parsing error:", e);
-        // message.text is already set to event.data.answer
       }
 
       console.debug("Adding message to UI:", message);
@@ -1462,6 +1496,45 @@ class AiAgentHaPanel extends LitElement {
     if (!this._showThinking) {
       this._thinkingExpanded = false;
     }
+  }
+
+  _renderTempChart(chartData) {
+    if (!chartData || chartData.type !== 'temperature') return html``;
+    const readings = chartData.readings;
+    if (!readings || readings.length === 0) return html``;
+
+    const values = readings.map(r => r.value);
+    const min = Math.min(...values) - 3;
+    const max = Math.max(...values) + 3;
+    const range = max - min || 1;
+    const barH = 22;
+    const gap = 10;
+    const labelW = 140;
+    const chartW = 200;
+    const svgW = labelW + chartW + 60;
+    const svgH = readings.length * (barH + gap) + 20;
+
+    return html`
+      <div class="chart-container">
+        <svg width="${svgW}" height="${svgH}" style="display:block;margin-top:10px;max-width:100%">
+          ${readings.map((r, i) => {
+            const barWidth = Math.max(4, Math.round(((r.value - min) / range) * chartW));
+            const y = i * (barH + gap) + 10;
+            const color = r.isOutdoor ? '#5B9BD5' : '#4CAF82';
+            return svg`
+              <text x="${labelW - 8}" y="${y + barH / 2 + 5}"
+                    text-anchor="end" font-size="12" fill="var(--secondary-text-color, #aaa)"
+                    font-family="sans-serif">${r.label}</text>
+              <rect x="${labelW}" y="${y}" width="${barWidth}" height="${barH}"
+                    rx="4" fill="${color}" opacity="0.85"></rect>
+              <text x="${labelW + barWidth + 6}" y="${y + barH / 2 + 5}"
+                    font-size="12" fill="var(--primary-text-color, #fff)"
+                    font-family="sans-serif" font-weight="600">${r.value}${r.unit}</text>
+            `;
+          })}
+        </svg>
+      </div>
+    `;
   }
 
   _renderThinkingPanel() {
