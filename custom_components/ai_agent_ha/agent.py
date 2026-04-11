@@ -136,7 +136,11 @@ class LocalClient(BaseAIClient):
         if self._openai_compat:
             # OpenAI-compatible mode: LM Studio, vLLM, and similar servers
             # Use POST /v1/chat/completions with messages array
-            endpoint = self.url if self.url.endswith("/chat/completions") else self.url + "/chat/completions"
+            endpoint = (
+                self.url
+                if self.url.endswith("/chat/completions")
+                else self.url + "/chat/completions"
+            )
             payload = {
                 "messages": messages,
                 "stream": False,
@@ -148,7 +152,9 @@ class LocalClient(BaseAIClient):
                 endpoint,
                 self.model or "[none]",
             )
-            _LOGGER.debug("Local API request payload: %s", json.dumps(payload, indent=2))
+            _LOGGER.debug(
+                "Local API request payload: %s", json.dumps(payload, indent=2)
+            )
         else:
             # Ollama-native mode: POST /api/generate with flat prompt string
             endpoint = self.url
@@ -171,7 +177,9 @@ class LocalClient(BaseAIClient):
             if self.model:
                 payload["model"] = self.model
 
-            _LOGGER.debug("Local API request payload: %s", json.dumps(payload, indent=2))
+            _LOGGER.debug(
+                "Local API request payload: %s", json.dumps(payload, indent=2)
+            )
 
             if "model" not in payload or not payload["model"]:
                 _LOGGER.warning(
