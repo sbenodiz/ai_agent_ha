@@ -904,7 +904,6 @@ class ZaiClient(BaseAIClient):
                 return str(data)
 
 
-
 class AskSageClient(BaseAIClient):
     """AI client for the Ask Sage Server API.
 
@@ -930,9 +929,7 @@ class AskSageClient(BaseAIClient):
         return [
             m["id"]
             for m in raw
-            if isinstance(m, dict)
-            and "id" in m
-            and "gov" not in m["id"].lower()
+            if isinstance(m, dict) and "id" in m and "gov" not in m["id"].lower()
         ]
 
     @classmethod
@@ -1008,14 +1005,16 @@ class AskSageClient(BaseAIClient):
             ) as resp:
                 if resp.status != 200:
                     error_text = await resp.text()
-                    _LOGGER.error(
-                        "Ask Sage API error %d: %s", resp.status, error_text
-                    )
+                    _LOGGER.error("Ask Sage API error %d: %s", resp.status, error_text)
                     raise Exception(f"Ask Sage API error {resp.status}")
                 data = await resp.json()
                 raw_text = data.get("message", str(data))
                 # Strip thinking/reasoning blocks produced by some underlying models
-                return BaseAIClient.strip_thinking_tags(raw_text) if hasattr(BaseAIClient, "strip_thinking_tags") else raw_text
+                return (
+                    BaseAIClient.strip_thinking_tags(raw_text)
+                    if hasattr(BaseAIClient, "strip_thinking_tags")
+                    else raw_text
+                )
 
 
 # === Main Agent ===
