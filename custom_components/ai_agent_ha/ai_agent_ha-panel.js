@@ -141,7 +141,9 @@ class AiAgentHaPanel extends LitElement {
       _activeSuggestionDashboard: { type: Object, reflect: false, attribute: false },
       _persistenceEnabled: { type: Boolean, reflect: false, attribute: false },
       _isStreaming: { type: Boolean, reflect: false, attribute: false },
-      _streamingText: { type: String, reflect: false, attribute: false }
+      _streamingText: { type: String, reflect: false, attribute: false },
+      _dashboardChangeActive: { type: Object, reflect: false, attribute: false },
+      _dashboardChangeText: { type: String, reflect: false, attribute: false }
     };
   }
 
@@ -1427,7 +1429,7 @@ class AiAgentHaPanel extends LitElement {
                           </select>
                           <ha-button
                             @click=${() => {
-                              const sel = this.shadowRoot.querySelector('.dashboard-picker-select');
+                              const sel = this.shadowRoot.querySelector(`#dashboard-picker-select-${msg.dashboard.title?.replace(/\s/g,'_')}`);
                               if (sel) this._addViewToExisting(msg.dashboard, sel.value);
                             }}
                             .disabled=${this._isLoading}
@@ -1776,8 +1778,9 @@ class AiAgentHaPanel extends LitElement {
       <div class="dashboard-preview">
         ${displayViews.map(view => html`
           <div class="preview-view-label">${view.title || 'View'}</div>
+          ${(view.cards && view.cards.length > 0) ? html`
           <div class="preview-card-grid">
-            ${(view.cards || []).map(card => {
+            ${view.cards.map(card => {
               const cardType = card?.type || '';
               const meta = CARD_TYPE_META[cardType] || DEFAULT_CARD_META;
               const title = card?.title || meta.label;
@@ -1791,6 +1794,7 @@ class AiAgentHaPanel extends LitElement {
               `;
             })}
           </div>
+          ` : ''}
         `)}
         ${remaining > 0 ? html`<div class="preview-more-views">+${remaining} more view${remaining !== 1 ? 's' : ''}</div>` : ''}
       </div>
@@ -1798,13 +1802,16 @@ class AiAgentHaPanel extends LitElement {
   }
 
   async _requestDashboardChange(dashboard) {
+    if (this._isLoading) return;
     const changeText = this._dashboardChangeText?.trim();
     if (!changeText) return;
+
+    // Sanitise title to prevent prompt injection
+    const safeTitle = (dashboard.title || 'Untitled').slice(0, 100).replace(/"/g, '\\"');
 
     this._dashboardChangeActive = null;
     this._dashboardChangeText = '';
 
-    // Add a user message with the change request
     this._messages = [...this._messages, { type: 'user', text: `Please update the dashboard: ${changeText}` }];
     this._isLoading = true;
     this._error = null;
@@ -1812,22 +1819,25 @@ class AiAgentHaPanel extends LitElement {
     this._thinkingExpanded = false;
     this.requestUpdate();
 
-    try {
-      // Inject the change request into the prompt textarea and send
-      const promptEl = this.shadowRoot.querySelector('#prompt');
-      if (promptEl) {
-        promptEl.value = `Please update the "${dashboard.title}" dashboard with the following changes: ${changeText}. Return a complete updated dashboard_suggestion JSON.`;
+    // Timeout fallback — consistent with _approveDashboard pattern
+    if (this._serviceCallTimeout) clearTimeout(this._serviceCallTimeout);
+    this._serviceCallTimeout = setTimeout(() => {
+      if (this._isLoading) {
+        this._clearLoadingState();
+        this._error = 'Request timed out. Please try again.';
+        this.requestUpdate();
       }
+    }, 300000);
+
+    try {
       await this.hass.callService('ai_agent_ha', 'query', {
-        prompt: `Please update the "${dashboard.title}" dashboard with the following changes: ${changeText}. Return a complete updated dashboard_suggestion JSON.`,
+        prompt: `Please update the "${safeTitle}" dashboard with the following changes: ${changeText}. Return a complete updated dashboard_suggestion JSON.`,
         provider: this._selectedProvider,
         debug: this._showThinking
       });
-      // Clear the textarea after sending
-      if (promptEl) promptEl.value = '';
     } catch (e) {
       console.error('Error requesting dashboard change:', e);
-      this._isLoading = false;
+      this._clearLoadingState();
       this._error = e.message || 'Failed to request dashboard changes';
       this.requestUpdate();
     }
@@ -1952,7 +1962,9 @@ class AiAgentHaPanel extends LitElement {
            changedProps.has('_dashboardPickerLoading') ||
            changedProps.has('_persistenceEnabled') ||
            changedProps.has('_isStreaming') ||
-           changedProps.has('_streamingText');
+           changedProps.has('_streamingText') ||
+           changedProps.has('_dashboardChangeActive') ||
+           changedProps.has('_dashboardChangeText');
   }
 
   _clearChat() {
@@ -1973,6 +1985,11 @@ class AiAgentHaPanel extends LitElement {
     } catch (e) {
       console.warn('AI Agent HA: failed to clear chat history from localStorage:', e);
     }
+    // Clear dashboard suggestion UI state
+    this._dashboardChangeActive = null;
+    this._dashboardChangeText = '';
+    this._dashboardPickerActive = false;
+    this._activeSuggestionDashboard = null;
     // Don't clear prompt history - users might want to keep it
   }
 
