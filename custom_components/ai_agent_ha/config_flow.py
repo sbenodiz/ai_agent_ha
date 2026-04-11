@@ -15,7 +15,7 @@ from homeassistant.helpers.selector import (
     TextSelectorConfig,
 )
 
-from .const import CONF_LOCAL_MODEL, CONF_LOCAL_URL, DOMAIN
+from .const import CONF_ASKSAGE_TOKEN, CONF_LOCAL_MODEL, CONF_LOCAL_URL, DOMAIN
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -27,6 +27,7 @@ PROVIDERS = {
     "anthropic": "Anthropic (Claude)",
     "alter": "Alter",
     "zai": "z.ai",
+    "asksage": "Ask Sage",
     "local": "Local Model",
 }
 
@@ -39,6 +40,7 @@ TOKEN_FIELD_NAMES = {
     "alter": "alter_token",
     "zai": "zai_token",
     "zai_endpoint": "zai_endpoint",
+    "asksage": CONF_ASKSAGE_TOKEN,
     "local": CONF_LOCAL_URL,  # For local models, we use URL instead of token
 }
 
@@ -51,6 +53,7 @@ TOKEN_LABELS = {
     "alter": "Alter API Key",
     "zai": "z.ai API Key",
     "zai_endpoint": "z.ai API Endpoint Type",
+    "asksage": "Ask Sage API Token",
     "local": "Local API URL (e.g., http://localhost:11434/api/generate)",
 }
 
@@ -62,6 +65,7 @@ DEFAULT_MODELS = {
     "anthropic": "claude-sonnet-4-5-20250929",
     "alter": "",  # User enters custom model
     "zai": "glm-4.7",  # Z.ai's latest flagship model
+    "asksage": "gpt-4o-mini",  # Ask Sage default; model list available via /get-models
     "local": "llama3.2",  # Updated to use llama3.2 as default
 }
 
@@ -135,6 +139,16 @@ AVAILABLE_MODELS = {
         "glm-4.5-airx",
         "glm-4.5-flash",
         "glm-4-32b-0414-128k",
+        "Custom...",
+    ],
+    # Ask Sage - static fallback list (live list fetched via /get-models at runtime)
+    "asksage": [
+        "gpt-4o-mini",
+        "gpt-4o",
+        "gpt-4-turbo",
+        "claude-3-haiku",
+        "claude-3-5-sonnet",
+        "llama-3.1-70b",
         "Custom...",
     ],
     # For local models, provide common Ollama models with llama3.2 as the default
@@ -319,7 +333,7 @@ class AiAgentHaConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):  # type: ig
                 },
             )
 
-        # Build schema for other providers
+        # Build schema for other providers (including asksage)
         schema_dict = {
             vol.Required(token_field): TextSelector(
                 TextSelectorConfig(type="password")
@@ -532,7 +546,7 @@ class AiAgentHaOptionsFlowHandler(config_entries.OptionsFlow):
                 },
             )
 
-        # Build schema for other providers
+        # Build schema for other providers (including asksage)
         schema_dict = {
             vol.Required(token_field, default=display_token): TextSelector(
                 TextSelectorConfig(type="password")
