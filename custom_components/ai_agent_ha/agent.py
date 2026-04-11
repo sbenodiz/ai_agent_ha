@@ -1152,6 +1152,7 @@ class AiAgentHaAgent:
         self._last_request_time = 0
         self._request_count = 0
         self._request_window_start = time.time()
+        self._query_lock = asyncio.Lock()  # Prevents concurrent history mutations
 
         provider = config.get("ai_provider", "openai")
         models_config = config.get("models", {})
@@ -2577,7 +2578,20 @@ Then restart Home Assistant to see your new dashboard in the sidebar."""
     async def process_query(
         self, user_query: str, provider: Optional[str] = None, debug: bool = False
     ) -> Dict[str, Any]:
-        """Process a user query with input validation and rate limiting."""
+        """Process a user query with input validation and rate limiting.
+
+        Acquires _query_lock before delegating to _process_query_inner to
+        prevent concurrent calls from interleaving conversation_history mutations.
+        """
+        async with self._query_lock:
+            return await self._process_query_inner(
+                user_query, provider=provider, debug=debug
+            )
+
+    async def _process_query_inner(
+        self, user_query: str, provider: Optional[str] = None, debug: bool = False
+    ) -> Dict[str, Any]:
+        """Inner implementation of process_query, always called under _query_lock."""
         try:
             if not user_query or not isinstance(user_query, str):
                 return {"success": False, "error": "Invalid query format"}
