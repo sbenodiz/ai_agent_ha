@@ -1560,6 +1560,13 @@ class AiAgentHaAgent:
     SYSTEM_PROMPT = {
         "role": "system",
         "content": (
+            "CRITICAL OUTPUT FORMAT RULES — READ BEFORE ANYTHING ELSE:\n"
+            "- You MUST respond with pure, valid JSON only. No exceptions.\n"
+            "- NEVER output YAML. NEVER output markdown. NEVER use code fences (```).\n"
+            '- If you are asked to build a dashboard, respond with JSON using request_type="dashboard_suggestion".\n'
+            '- A response that starts with "title:", "views:", or "cards:" is WRONG and will break the application.\n'
+            "- WRONG: title: My Dashboard\\nviews:\\n  - cards:...\n"
+            '- RIGHT: {"request_type": "dashboard_suggestion", "dashboard": {"title": "My Dashboard", "views": [...]}}\n\n'
             "You are an AI assistant integrated with Home Assistant.\n"
             "You can request specific data by using only these commands:\n"
             "- get_entity_state(entity_id): Get state of a specific entity\n"
@@ -1636,7 +1643,9 @@ class AiAgentHaAgent:
             '      "cards": [...]\n'
             "    }]\n"
             "  }\n"
-            "}\n\n"
+            "}\n"
+            "IMPORTANT: The above MUST be returned as raw JSON. Do NOT format it as YAML. "
+            "Do NOT add markdown fences. The response must start with { and end with }.\n\n"
             "For data requests, use this exact JSON format:\n"
             "{\n"
             '  "request_type": "data_request",\n'
@@ -1675,6 +1684,13 @@ class AiAgentHaAgent:
     SYSTEM_PROMPT_LOCAL = {
         "role": "system",
         "content": (
+            "CRITICAL OUTPUT FORMAT RULES — READ BEFORE ANYTHING ELSE:\n"
+            "- You MUST respond with pure, valid JSON only. No exceptions.\n"
+            "- NEVER output YAML. NEVER output markdown. NEVER use code fences (```).\n"
+            '- If you are asked to build a dashboard, respond with JSON using request_type="dashboard_suggestion".\n'
+            '- A response that starts with "title:", "views:", or "cards:" is WRONG and will break the application.\n'
+            "- WRONG: title: My Dashboard\\nviews:\\n  - cards:...\n"
+            '- RIGHT: {"request_type": "dashboard_suggestion", "dashboard": {"title": "My Dashboard", "views": [...]}}\n\n'
             "You are an AI assistant integrated with Home Assistant.\n"
             "You can request specific data by using only these commands:\n"
             "- get_entity_state(entity_id): Get state of a specific entity\n"
@@ -1751,7 +1767,9 @@ class AiAgentHaAgent:
             '      "cards": [...]\n'
             "    }]\n"
             "  }\n"
-            "}\n\n"
+            "}\n"
+            "IMPORTANT: The above MUST be returned as raw JSON. Do NOT format it as YAML. "
+            "Do NOT add markdown fences. The response must start with { and end with }.\n\n"
             "For data requests, use this exact JSON format:\n"
             "{\n"
             '  "request_type": "data_request",\n'
@@ -4267,6 +4285,42 @@ Then restart Home Assistant to see your new dashboard in the sidebar."""
                                 :history_rollback_index
                             ]
                             return result
+
+                        # Try YAML recovery for dashboard responses before falling back to final_response
+                        yaml_dashboard_indicators = ["title:", "views:", "cards:", "type: custom:", "type: entities"]
+                        if any(indicator in response for indicator in yaml_dashboard_indicators):
+                            try:
+                                parsed_yaml = yaml.safe_load(response)
+                                if isinstance(parsed_yaml, dict) and any(
+                                    k in parsed_yaml for k in ["title", "views", "cards"]
+                                ):
+                                    _LOGGER.warning(
+                                        "LLM returned YAML for dashboard — recovering via yaml.safe_load()"
+                                    )
+                                    response_data = {
+                                        "request_type": "dashboard_suggestion",
+                                        "dashboard": parsed_yaml,
+                                    }
+                                    # Route through the normal dashboard_suggestion path
+                                    self.conversation_history.append(
+                                        {
+                                            "role": "assistant",
+                                            "content": json.dumps(response_data),
+                                        }
+                                    )
+                                    result = {
+                                        "success": True,
+                                        "answer": json.dumps(response_data),
+                                    }
+                                    if thinking_content:
+                                        result["thinking"] = thinking_content
+                                        result["thinking_duration"] = thinking_duration
+                                    result = _with_debug(result)
+                                    self._trim_history()
+                                    self._set_cached_data(cache_key, result)
+                                    return result
+                            except yaml.YAMLError:
+                                pass
 
                         # If response is not valid JSON, try to wrap it as a final response
                         try:
