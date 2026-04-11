@@ -314,41 +314,13 @@ class AiAgentHaPanel extends LitElement {
         align-items: center;
         gap: 8px;
       }
-      .provider-button {
-        display: flex;
-        align-items: center;
-        gap: 6px;
-        padding: 6px 12px;
-        background: var(--secondary-background-color);
-        border: 1px solid var(--divider-color);
-        border-radius: 8px;
-        cursor: pointer;
-        font-size: 14px;
-        font-weight: 500;
-        color: var(--primary-text-color);
-        transition: all 0.2s ease;
-        min-width: 150px;
-        -webkit-appearance: none;
-        -moz-appearance: none;
-        appearance: none;
-        background-image: url('data:image/svg+xml;charset=US-ASCII,<svg width="14" height="14" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M7 10l5 5 5-5H7z" fill="currentColor"/></svg>');
-        background-repeat: no-repeat;
-        background-position: right 8px center;
-        padding-right: 30px;
-      }
-      .provider-button:hover {
-        background-color: var(--primary-background-color);
-        border-color: var(--primary-color);
-      }
-      .provider-button:focus {
-        outline: none;
-        border-color: var(--primary-color);
-        box-shadow: 0 0 0 2px rgba(var(--primary-color-rgb), 0.2);
-      }
       .provider-label {
-        font-size: 12px;
-        color: var(--secondary-text-color);
-        margin-right: 8px;
+        font-size: 0.75rem;
+        color: var(--secondary-text-color, #888);
+        white-space: nowrap;
+        padding: 4px 8px;
+        border-radius: 12px;
+        background: var(--secondary-background-color, rgba(0,0,0,0.05));
       }
       .thinking-toggle {
         display: flex;
@@ -647,15 +619,7 @@ class AiAgentHaPanel extends LitElement {
     this._showThinking = false;
     this._thinkingExpanded = false;
     this._debugInfo = null;
-    // Bound reference so the same function can be added and removed
-    this._boundOutsideClickHandler = this._handleOutsideClick.bind(this);
     console.debug("AI Agent HA Panel constructor called");
-  }
-
-  _handleOutsideClick(e) {
-    if (!this.shadowRoot.querySelector('.provider-selector')?.contains(e.target)) {
-      this._showProviderDropdown = false;
-    }
   }
 
   _loadMessages() {
@@ -704,14 +668,12 @@ class AiAgentHaPanel extends LitElement {
       await this._loadPromptHistory();
     }
 
-    // Close dropdown when clicking outside (single listener, cleaned up in disconnectedCallback)
-    document.addEventListener('click', this._boundOutsideClickHandler);
-  }
-
-  disconnectedCallback() {
-    super.disconnectedCallback();
-    document.removeEventListener('click', this._boundOutsideClickHandler);
-    console.debug("AI Agent HA Panel disconnected — click listener removed");
+    // Close dropdown when clicking outside
+    document.addEventListener('click', (e) => {
+      if (!this.shadowRoot.querySelector('.provider-selector')?.contains(e.target)) {
+        this._showProviderDropdown = false;
+      }
+    });
   }
 
   async updated(changedProps) {
@@ -750,9 +712,13 @@ class AiAgentHaPanel extends LitElement {
               const provider = this._resolveProviderFromEntry(entry);
               if (!provider) return null;
 
+              const models = entry.data?.models || entry.options?.models || {};
+              const modelName = models[provider] || '';
+
               return {
                 value: provider,
-                label: PROVIDERS[provider] || provider
+                label: PROVIDERS[provider] || provider,
+                model: modelName
               };
             })
             .filter(Boolean);
@@ -1085,21 +1051,12 @@ class AiAgentHaPanel extends LitElement {
 
             <div class="input-footer">
               <div class="provider-selector">
-                <span class="provider-label">Model:</span>
-                <select
-                  class="provider-button"
-                  @change=${(e) => this._selectProvider(e.target.value)}
-                  .value=${this._selectedProvider || ''}
-                >
-                  ${this._availableProviders.map(provider => html`
-                    <option
-                      value=${provider.value}
-                      ?selected=${provider.value === this._selectedProvider}
-                    >
-                      ${provider.label}
-                    </option>
-                  `)}
-                </select>
+                ${(() => {
+                  const p = this._availableProviders.find(p => p.value === this._selectedProvider);
+                  const providerLabel = p ? p.label : (this._selectedProvider || 'No provider configured');
+                  const modelLabel = p?.model ? ` \u00b7 ${p.model}` : '';
+                  return html`<span class="provider-label">${providerLabel}${modelLabel}</span>`;
+                })()}
               </div>
               <label class="thinking-toggle">
                 <input
