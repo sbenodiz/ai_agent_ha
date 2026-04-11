@@ -1,24 +1,24 @@
 {
-    "domain": "ai_agent_ha",
-    "name": "AI Agent HA",
-    "after_dependencies": [
-        "history",
-        "recorder",
-        "lovelace"
-    ],
-    "codeowners": [
-        "@sbenodiz"
-    ],
-    "config_flow": true,
-    "dependencies": [
-        "http"
-    ],
-    "documentation": "https://github.com/sbenodiz/ai_agent_ha",
-    "integration_type": "service",
-    "iot_class": "cloud_polling",
-    "issue_tracker": "https://github.com/sbenodiz/ai_agent_ha/issues",
-    "requirements": [
-        "aiohttp>=3.8.0"
-    ],
-    "version": "1.08"
+  "domain": "ai_agent_ha",
+  "name": "AI Agent HA",
+  "after_dependencies": [
+    "history",
+    "recorder",
+    "lovelace"
+  ],
+  "codeowners": [
+    "@sbenodiz"
+  ],
+  "config_flow": true,
+  "dependencies": [
+    "http"
+  ],
+  "documentation": "https://github.com/sbenodiz/ai_agent_ha",
+  "integration_type": "service",
+  "iot_class": "cloud_polling",
+  "issue_tracker": "https://github.com/sbenodiz/ai_agent_ha/issues",
+  "requirements": [
+    "aiohttp>=3.8.0"
+  ],
+  "version": "1.08.1"
 }
