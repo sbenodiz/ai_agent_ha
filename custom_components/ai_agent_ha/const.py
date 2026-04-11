@@ -32,6 +32,9 @@ AI_PROVIDERS = [
     "asksage",
 ]
 
+# Chat persistence
+CONF_PERSIST_CHAT_HISTORY = "persist_chat_history"
+
 # AI Provider constants
 CONF_MODELS = "models"
 
