@@ -937,39 +937,43 @@ class AiAgentHaPanel extends LitElement {
       this.providersLoaded = true;
 
       try {
-        // Uses the WebSocket API to get all entries with their complete data
-        const allEntries = await this.hass.callWS({ type: 'config_entries/get' });
+        // Primary: use ai_agent_ha/get_providers — authoritative, no credential exposure
+        let providers = [];
+        let persistenceEnabled = false;
+        let streamingEnabled = false;
 
-        const aiAgentEntries = allEntries.filter(
-          entry => entry.domain === 'ai_agent_ha'
-        );
-
-        if (aiAgentEntries.length > 0) {
-          const providers = aiAgentEntries
+        try {
+          const providerData = await this.hass.callWS({ type: 'ai_agent_ha/get_providers' });
+          if (providerData && providerData.length > 0) {
+            providers = providerData.map(p => ({
+              value: p.value,
+              label: p.label,
+              model: p.model || ''
+            }));
+            persistenceEnabled = providerData.some(p => p.persist_chat_history);
+            streamingEnabled = providerData.some(p => p.enable_streaming);
+            console.debug("AI Agent HA: providers loaded via get_providers WS:", providers);
+          }
+        } catch (wsErr) {
+          console.warn("AI Agent HA: get_providers WS failed, falling back to config_entries/get:", wsErr);
+          // Fallback: parse config_entries/get (title + unique_id only — entry.data not exposed by HA)
+          const allEntries = await this.hass.callWS({ type: 'config_entries/get' });
+          const aiAgentEntries = allEntries.filter(entry => entry.domain === 'ai_agent_ha');
+          providers = aiAgentEntries
             .map(entry => {
               const provider = this._resolveProviderFromEntry(entry);
               if (!provider) return null;
-
-              const models = entry.data?.models || entry.options?.models || {};
-              const modelName = models[provider] || '';
-
-              return {
-                value: provider,
-                label: PROVIDERS[provider] || provider,
-                model: modelName
-              };
+              return { value: provider, label: PROVIDERS[provider] || provider, model: '' };
             })
             .filter(Boolean);
+          console.debug("AI Agent HA: providers loaded via config_entries fallback:", providers);
+        }
 
+        if (providers.length > 0) {
           this._availableProviders = providers;
+          this._persistenceEnabled = persistenceEnabled;
 
-          // Check persistence setting from config entries
-          const persistEntry = aiAgentEntries.find(e =>
-            (e.options?.persist_chat_history || e.data?.persist_chat_history)
-          );
-          this._persistenceEnabled = !!(persistEntry?.options?.persist_chat_history || persistEntry?.data?.persist_chat_history);
-
-          console.debug("Available AI providers (mapped from data/title):", this._availableProviders);
+          console.debug("Available AI providers:", this._availableProviders);
           console.debug("Chat persistence enabled:", this._persistenceEnabled);
 
           if (
@@ -984,11 +988,11 @@ class AiAgentHaPanel extends LitElement {
             this._loadHistoryFromStorage();
           }
         } else {
-          console.debug("No 'ai_agent_ha' config entries found via WebSocket.");
+          console.debug("No 'ai_agent_ha' providers found.");
           this._availableProviders = [];
         }
       } catch (error) {
-        console.error("Error fetching config entries via WebSocket:", error);
+        console.error("Error fetching AI providers:", error);
         this._error = error.message || 'Failed to load AI provider configurations.';
         this._availableProviders = [];
       }
