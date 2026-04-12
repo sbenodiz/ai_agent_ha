@@ -948,6 +948,8 @@ class AiAgentHaPanel extends LitElement {
     this._promptHistory = [];
     this._promptHistoryLoaded = false;
     this._lastResponseTs = 0; // Track last processed response timestamp
+    this._activeQueryId = null; // Correlation ID for the current in-flight query
+    this._queryCounter = 0;     // Monotonic counter for generating query IDs
     this._dashboardDisplayMode = localStorage.getItem(DASHBOARD_MODE_KEY) || 'visual'; // 'visual' or 'yaml'
     this._perMessageYamlToggle = {}; // per-message overrides: msgIndex -> 'visual'|'yaml'
     this._showPredefinedPrompts = true;
@@ -1769,12 +1771,20 @@ class AiAgentHaPanel extends LitElement {
     // can distinguish stale vs fresh responses in the state entity.
     const queryStartTs = this._lastResponseTs;
 
+    // Generate a unique query ID to correlate responses with requests.
+    // This prevents stale responses from a previous slow query being
+    // rendered as if they belong to the current query.
+    this._queryCounter += 1;
+    const queryId = `q_${this._queryCounter}_${Date.now()}`;
+    this._activeQueryId = queryId;
+    console.debug(`Query ${queryId} starting`);
+
     // Start fallback poll *before* awaiting the service call.
     // callService is awaited and may block for 10-30s on slow LLM
     // round-trips — if the event fires while we're still awaiting,
     // the event handler picks it up and cancels the poll.  If not,
     // the poll recovers the response from the state entity.
-    this._startFallbackPoll(queryStartTs);
+    this._startFallbackPoll(queryStartTs, queryId);
 
     try {
       console.debug("Calling ai_agent_ha service");
@@ -1787,11 +1797,11 @@ class AiAgentHaPanel extends LitElement {
       // Service call resolved — if we're still loading, the event
       // may have fired while JS was blocked on the await.  Do an
       // immediate one-shot check of the state entity.
-      if (this._isLoading) {
+      if (this._isLoading && this._activeQueryId === queryId) {
         try {
           const snap = await this.hass.callWS({ type: 'ai_agent_ha/get_last_response' });
           if (snap && (snap._ts || 0) > queryStartTs && (snap._ts || 0) > this._lastResponseTs) {
-            console.debug('Post-await recovery: found response in state entity');
+            console.debug(`Post-await recovery (${queryId}): found response in state entity`);
             this._handleLlamaResponse({ data: snap });
           }
         } catch (_) { /* poll will catch it */ }
@@ -1819,7 +1829,7 @@ class AiAgentHaPanel extends LitElement {
     }
   }
 
-  _startFallbackPoll(queryStartTs) {
+  _startFallbackPoll(queryStartTs, queryId) {
     // Don't start a second poller if one is already running
     if (this._fallbackPollTimer) return;
 
@@ -1830,8 +1840,9 @@ class AiAgentHaPanel extends LitElement {
     this._fallbackPollTimer = setInterval(async () => {
       elapsed += POLL_INTERVAL;
 
-      // Stop polling if we're no longer loading (event arrived) or timed out
-      if (!this._isLoading || elapsed > POLL_MAX) {
+      // Stop polling if we're no longer loading (event arrived), if the
+      // active query has changed (user sent a new prompt), or if timed out.
+      if (!this._isLoading || this._activeQueryId !== queryId || elapsed > POLL_MAX) {
         clearInterval(this._fallbackPollTimer);
         this._fallbackPollTimer = null;
         return;
@@ -1844,7 +1855,7 @@ class AiAgentHaPanel extends LitElement {
         const responseTs = result._ts || 0;
         // Only process if this is a *newer* response than when we started
         if (responseTs > queryStartTs && responseTs > this._lastResponseTs) {
-          console.debug('Fallback poll: recovered response from state entity', responseTs);
+          console.debug(`Fallback poll (${queryId}): recovered response from state entity`, responseTs);
           clearInterval(this._fallbackPollTimer);
           this._fallbackPollTimer = null;
           // Feed into the existing handler as a synthetic event
@@ -1874,6 +1885,14 @@ class AiAgentHaPanel extends LitElement {
 
   _handleLlamaResponse(event) {
     console.debug("Received llama response:", event);
+
+    // Guard: ignore late-arriving responses if we are not currently
+    // waiting for one.  This prevents stale results from a previous
+    // slow query being rendered after the user has already moved on.
+    if (!this._isLoading) {
+      console.debug('Ignoring response — not currently loading (stale or duplicate)');
+      return;
+    }
     
     // Cancel fallback poll since event arrived
     if (this._fallbackPollTimer) {
@@ -1886,6 +1905,8 @@ class AiAgentHaPanel extends LitElement {
     } else {
       this._lastResponseTs = Date.now() / 1000;
     }
+    // Clear active query ID so no further duplicates are processed
+    this._activeQueryId = null;
 
     try {
       this._clearLoadingState();
@@ -2127,7 +2148,10 @@ class AiAgentHaPanel extends LitElement {
     }, 300000);
 
     const queryStartTs = this._lastResponseTs;
-    this._startFallbackPoll(queryStartTs);
+    this._queryCounter += 1;
+    const queryId = `qd_${this._queryCounter}_${Date.now()}`;
+    this._activeQueryId = queryId;
+    this._startFallbackPoll(queryStartTs, queryId);
     try {
       await this.hass.callService('ai_agent_ha', 'query', {
         prompt: `Please update the "${safeTitle}" dashboard with the following changes: ${changeText}. Return a complete updated dashboard_suggestion JSON.`,
