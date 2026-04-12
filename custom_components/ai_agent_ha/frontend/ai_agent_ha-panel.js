@@ -860,6 +860,7 @@ class AiAgentHaPanel extends LitElement {
     this._pendingAutomation = null;
     this._promptHistory = [];
     this._promptHistoryLoaded = false;
+    this._lastResponseTs = 0; // Track last processed response timestamp
     this._showPredefinedPrompts = true;
     this._showPromptHistory = true;
     this._predefinedPrompts = [
@@ -1041,6 +1042,11 @@ class AiAgentHaPanel extends LitElement {
     }
     if (this._streamEndUnsub) {
       try { this._streamEndUnsub.then(unsub => unsub()); } catch (_) {}
+    }
+    // Clean up fallback poll
+    if (this._fallbackPollTimer) {
+      clearInterval(this._fallbackPollTimer);
+      this._fallbackPollTimer = null;
     }
   }
 
@@ -1625,6 +1631,10 @@ class AiAgentHaPanel extends LitElement {
       }
     }, 300000); // 300 second timeout (matches backend aiohttp timeout)
 
+    // Record the timestamp *before* firing the service so the fallback
+    // can distinguish stale vs fresh responses in the state entity.
+    const queryStartTs = this._lastResponseTs;
+
     try {
       console.debug("Calling ai_agent_ha service");
       await this.hass.callService('ai_agent_ha', 'query', {
@@ -1632,6 +1642,14 @@ class AiAgentHaPanel extends LitElement {
         provider: this._selectedProvider,
         debug: this._showThinking
       });
+
+      // ── Fallback poll ──────────────────────────────────────────
+      // If the event bus delivery is missed (race condition, slow
+      // round-trip, etc.) we poll the state entity every 3 s for up
+      // to 300 s.  If we find a newer response, we synthesise a
+      // fake event and feed it into the existing handler.
+      this._startFallbackPoll(queryStartTs);
+
     } catch (error) {
       console.error("Error calling service:", error);
       this._clearLoadingState();
@@ -1649,6 +1667,47 @@ class AiAgentHaPanel extends LitElement {
       clearTimeout(this._serviceCallTimeout);
       this._serviceCallTimeout = null;
     }
+    if (this._fallbackPollTimer) {
+      clearInterval(this._fallbackPollTimer);
+      this._fallbackPollTimer = null;
+    }
+  }
+
+  _startFallbackPoll(queryStartTs) {
+    // Don't start a second poller if one is already running
+    if (this._fallbackPollTimer) return;
+
+    let elapsed = 0;
+    const POLL_INTERVAL = 3000;   // 3 seconds
+    const POLL_MAX     = 300000;  // 5 minutes (matches main timeout)
+
+    this._fallbackPollTimer = setInterval(async () => {
+      elapsed += POLL_INTERVAL;
+
+      // Stop polling if we're no longer loading (event arrived) or timed out
+      if (!this._isLoading || elapsed > POLL_MAX) {
+        clearInterval(this._fallbackPollTimer);
+        this._fallbackPollTimer = null;
+        return;
+      }
+
+      try {
+        const result = await this.hass.callWS({ type: 'ai_agent_ha/get_last_response' });
+        if (!result) return;
+
+        const responseTs = result._ts || 0;
+        // Only process if this is a *newer* response than when we started
+        if (responseTs > queryStartTs && responseTs > this._lastResponseTs) {
+          console.debug('Fallback poll: recovered response from state entity', responseTs);
+          clearInterval(this._fallbackPollTimer);
+          this._fallbackPollTimer = null;
+          // Feed into the existing handler as a synthetic event
+          this._handleLlamaResponse({ data: result });
+        }
+      } catch (e) {
+        console.debug('Fallback poll error:', e);
+      }
+    }, POLL_INTERVAL);
   }
 
   _handleStreamChunk(event) {
@@ -1670,6 +1729,18 @@ class AiAgentHaPanel extends LitElement {
   _handleLlamaResponse(event) {
     console.debug("Received llama response:", event);
     
+    // Cancel fallback poll since event arrived
+    if (this._fallbackPollTimer) {
+      clearInterval(this._fallbackPollTimer);
+      this._fallbackPollTimer = null;
+    }
+    // Track timestamp to prevent duplicate processing from fallback
+    if (event.data?._ts) {
+      this._lastResponseTs = event.data._ts;
+    } else {
+      this._lastResponseTs = Date.now() / 1000;
+    }
+
     try {
       this._clearLoadingState();
       this._isStreaming = false;
@@ -1922,12 +1993,14 @@ class AiAgentHaPanel extends LitElement {
       }
     }, 300000);
 
+    const queryStartTs = this._lastResponseTs;
     try {
       await this.hass.callService('ai_agent_ha', 'query', {
         prompt: `Please update the "${safeTitle}" dashboard with the following changes: ${changeText}. Return a complete updated dashboard_suggestion JSON.`,
         provider: this._selectedProvider,
         debug: this._showThinking
       });
+      this._startFallbackPoll(queryStartTs);
     } catch (e) {
       console.error('Error requesting dashboard change:', e);
       this._clearLoadingState();
