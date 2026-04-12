@@ -3361,6 +3361,28 @@ class AiAgentHaAgent:
             # preventing a failed query from poisoning the next call.
             history_rollback_index = len(self.conversation_history)
             self.conversation_history.append({"role": "user", "content": user_query})
+
+            # Reset conversation context for new dashboard requests to prevent
+            # entity data contamination from previous queries
+            dashboard_keywords = ["create", "build", "make", "generate", "design", "new"]
+            dashboard_nouns = ["dashboard", "panel", "view", "screen"]
+            query_lower = user_query.lower()
+            is_new_dashboard_request = (
+                any(kw in query_lower for kw in dashboard_keywords)
+                and any(noun in query_lower for noun in dashboard_nouns)
+            )
+            if is_new_dashboard_request:
+                _LOGGER.debug(
+                    "New dashboard request detected — resetting conversation context"
+                )
+                # Keep only system prompt + current user message
+                self.conversation_history = [
+                    self.system_prompt,
+                    {"role": "user", "content": user_query},
+                ]
+                # Rollback to index 1 so error recovery drops the user message
+                history_rollback_index = 1
+
             _LOGGER.debug(
                 "Added user query to conversation history (rollback index=%d)",
                 history_rollback_index,
