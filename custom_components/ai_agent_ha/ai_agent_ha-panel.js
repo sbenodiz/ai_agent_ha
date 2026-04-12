@@ -894,7 +894,6 @@ class AiAgentHaPanel extends LitElement {
     this._streamingText = '';
     this._streamChunkUnsub = null;
     this._streamEndUnsub = null;
-    this._responseUnsub = null;
     this._dashboardChangeActive = null;
     this._dashboardChangeText = '';
     console.debug("AI Agent HA Panel constructor called");
@@ -992,18 +991,18 @@ class AiAgentHaPanel extends LitElement {
     console.debug("AI Agent HA Panel connected");
     if (this.hass && !this._eventSubscriptionSetup) {
       this._eventSubscriptionSetup = true;
-      this._responseUnsub = await this.hass.connection.subscribeEvents(
+      this.hass.connection.subscribeEvents(
         (event) => this._handleLlamaResponse(event),
         'ai_agent_ha_response'
       );
       console.debug("Event subscription set up in connectedCallback()");
 
       // Subscribe to streaming events
-      this._streamChunkUnsub = await this.hass.connection.subscribeEvents(
+      this._streamChunkUnsub = this.hass.connection.subscribeEvents(
         (event) => this._handleStreamChunk(event),
         'ai_agent_ha/stream_chunk'
       );
-      this._streamEndUnsub = await this.hass.connection.subscribeEvents(
+      this._streamEndUnsub = this.hass.connection.subscribeEvents(
         (event) => this._handleStreamEnd(event),
         'ai_agent_ha/stream_end'
       );
@@ -1036,15 +1035,12 @@ class AiAgentHaPanel extends LitElement {
     if (this._logoutHandler) {
       window.removeEventListener('hass-logout', this._logoutHandler);
     }
-    // Clean up event subscriptions
-    if (this._responseUnsub) {
-      try { this._responseUnsub(); } catch (_) {}
-    }
+    // Clean up streaming subscriptions
     if (this._streamChunkUnsub) {
-      try { this._streamChunkUnsub(); } catch (_) {}
+      try { this._streamChunkUnsub.then(unsub => unsub()); } catch (_) {}
     }
     if (this._streamEndUnsub) {
-      try { this._streamEndUnsub(); } catch (_) {}
+      try { this._streamEndUnsub.then(unsub => unsub()); } catch (_) {}
     }
   }
 
@@ -1059,7 +1055,7 @@ class AiAgentHaPanel extends LitElement {
     // Set up event subscription when hass becomes available
     if (changedProps.has('hass') && this.hass && !this._eventSubscriptionSetup) {
       this._eventSubscriptionSetup = true;
-      this._responseUnsub = await this.hass.connection.subscribeEvents(
+      this.hass.connection.subscribeEvents(
         (event) => this._handleLlamaResponse(event),
         'ai_agent_ha_response'
       );
@@ -2041,29 +2037,16 @@ class AiAgentHaPanel extends LitElement {
     this._dashboardPickerActive = false;
     this._activeSuggestionDashboard = null;
     try {
-      // Step 1: Fetch existing dashboard config
-      const existing = await this.hass.callWS({
-        type: 'lovelace/config',
-        url_path: targetDashboardUrl,
-      });
-
-      // Step 2: Merge — append new views to existing views
-      const existingViews = (existing && existing.views) ? existing.views : [];
-      const newViews = dashboard.views || [];
-      const mergedViews = [...existingViews, ...newViews];
-
-      // Step 3: Save merged config back
-      await this.hass.callWS({
-        type: 'lovelace/config/save',
-        url_path: targetDashboardUrl,
-        config: { views: mergedViews },
-      });
-
+      // Pass just the views array as the config to update_dashboard
+      const viewsConfig = { views: dashboard.views || [] };
+      const result = await this.hass.callService('ai_agent_ha', 'update_dashboard', {
+        dashboard_url: targetDashboardUrl,
+        dashboard_config: viewsConfig
+      }, {}, true);
       const targetName = this._existingDashboards.find(d => d.url_path === targetDashboardUrl)?.title || targetDashboardUrl;
-      const viewWord = newViews.length !== 1 ? 'views' : 'view';
       this._messages = [...this._messages, {
         type: 'assistant',
-        text: `Added ${newViews.length} ${viewWord} to "${targetName}" successfully.`
+        text: result?.message || `"${dashboard.title}" view${dashboard.views?.length !== 1 ? 's' : ''} added to "${targetName}" successfully.`
       }];
     } catch (error) {
       console.error('Error adding view to dashboard:', error);
