@@ -86,6 +86,55 @@ def _extract_json_from_text(text: str) -> Optional[dict]:
     return None
 
 
+def _extract_actionable_json(
+    text: str, target_types: tuple = ("dashboard_suggestion", "automation_suggestion")
+) -> Optional[dict]:
+    """Scan *text* for the last JSON object whose request_type is in *target_types*.
+
+    When the model wraps a multi-step response inside a final_response,
+    the text may contain multiple JSON blobs (e.g. data_request result,
+    then dashboard_suggestion).  We want the *actionable* one — the last
+    object that matches one of the target request_types.
+    """
+    best: Optional[dict] = None
+    # Walk through every '{' and attempt to parse
+    idx = 0
+    while idx < len(text):
+        start = text.find("{", idx)
+        if start == -1:
+            break
+        # Quick pre-check — does the text near this brace mention a target type?
+        snippet = text[start : start + 200]
+        if not any(t in snippet for t in target_types):
+            idx = start + 1
+            continue
+        # Try to parse from this position
+        depth = 0
+        end = start
+        for i in range(start, len(text)):
+            if text[i] == "{":
+                depth += 1
+            elif text[i] == "}":
+                depth -= 1
+                if depth == 0:
+                    end = i + 1
+                    break
+        if depth != 0:
+            idx = start + 1
+            continue
+        try:
+            candidate = json.loads(text[start:end])
+            if (
+                isinstance(candidate, dict)
+                and candidate.get("request_type") in target_types
+            ):
+                best = candidate  # keep scanning — take the last match
+        except (json.JSONDecodeError, ValueError):
+            pass
+        idx = end
+    return best
+
+
 # === Security Utilities ===
 def sanitize_for_logging(data: Any, mask: str = "***REDACTED***") -> Any:
     """Sanitize sensitive data for safe logging.
@@ -3791,6 +3840,39 @@ class AiAgentHaAgent:
                             continue
 
                         elif response_data.get("request_type") == "final_response":
+                            # Check if the response body embeds a dashboard_suggestion
+                            # (or other actionable JSON).  This happens when the model
+                            # does a multi-step tool call (e.g. entity lookup → dashboard
+                            # generation) and wraps the whole output in final_response.
+                            raw_resp = response_data.get("response", "")
+                            _embedded = _extract_actionable_json(
+                                str(raw_resp),
+                                ("dashboard_suggestion", "automation_suggestion"),
+                            )
+                            if _embedded:
+                                _LOGGER.debug(
+                                    "Extracted embedded %s from final_response",
+                                    _embedded.get("request_type"),
+                                )
+                                # Re-route: store the embedded object as the real answer
+                                self.conversation_history.append(
+                                    {
+                                        "role": "assistant",
+                                        "content": json.dumps(_embedded),
+                                    }
+                                )
+                                result = {
+                                    "success": True,
+                                    "answer": json.dumps(_embedded),
+                                }
+                                if thinking_content:
+                                    result["thinking"] = thinking_content
+                                    result["thinking_duration"] = thinking_duration
+                                result = _with_debug(result)
+                                self._trim_history()
+                                self._set_cached_data(cache_key, result)
+                                return result
+
                             # Add final response to conversation history
                             self.conversation_history.append(
                                 {
@@ -3808,7 +3890,7 @@ class AiAgentHaAgent:
                             )
                             result = {
                                 "success": True,
-                                "answer": response_data.get("response", ""),
+                                "answer": raw_resp,
                             }
                             # Attach thinking content if present
                             if thinking_content:
