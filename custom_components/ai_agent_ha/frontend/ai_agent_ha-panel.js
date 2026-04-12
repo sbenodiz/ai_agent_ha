@@ -1783,7 +1783,31 @@ class AiAgentHaPanel extends LitElement {
       // Check if the response contains an automation or dashboard suggestion
       try {
         console.debug("Attempting to parse response:", event.data.answer?.substring(0, 200));
-        const { actionable: response, all: allObjects } = extractAllJson(event.data.answer || '');
+        let answerText = event.data.answer || '';
+        // If the answer is a JSON-encoded string (double-encoded), unwrap one level
+        // so extractAllJson can find the embedded objects.
+        if (answerText.startsWith('"') || answerText.startsWith("'")) {
+          try {
+            const unwrapped = JSON.parse(answerText);
+            if (typeof unwrapped === 'string') answerText = unwrapped;
+          } catch (_) { /* not double-encoded, use as-is */ }
+        }
+        let { actionable: response, all: allObjects } = extractAllJson(answerText);
+        // If extractAllJson found nothing actionable, try parsing the whole answer
+        // as a single JSON object (common when agent.py returns clean JSON)
+        if (!response && answerText.trim().startsWith('{')) {
+          try {
+            const parsed = JSON.parse(answerText);
+            if (parsed && parsed.request_type) {
+              response = parsed;
+              allObjects = [parsed];
+            } else if (parsed && typeof parsed.response === 'string') {
+              // final_response wrapper — extract from inner response
+              const inner = extractAllJson(parsed.response);
+              if (inner.actionable) { response = inner.actionable; allObjects = inner.all; }
+            }
+          } catch (_) { /* continue with original */ }
+        }
         console.debug("Extracted actionable JSON:", response);
 
         // Detect temperature chart data from intermediate data objects
