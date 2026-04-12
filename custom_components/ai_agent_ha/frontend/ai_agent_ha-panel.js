@@ -131,6 +131,48 @@ const CARD_TYPE_META = {
 };
 const DEFAULT_CARD_META = { icon: 'mdi:card', color: '#90a4ae', label: 'Card' };
 
+// ── JSON-to-YAML converter for Lovelace dashboard configs ──────────
+// Lightweight serializer — no external dependencies.
+function jsonToYaml(obj, indent = 0) {
+  const pad = '  '.repeat(indent);
+  if (obj === null || obj === undefined) return pad + 'null';
+  if (typeof obj === 'boolean') return pad + String(obj);
+  if (typeof obj === 'number') return pad + String(obj);
+  if (typeof obj === 'string') {
+    // Quote strings that contain special YAML characters or look numeric
+    if (/[:#{}\[\],&*?|>!%@`]/.test(obj) || /^\s/.test(obj) || /\s$/.test(obj)
+        || obj === '' || obj === 'true' || obj === 'false' || obj === 'null'
+        || /^[\d.+-]+$/.test(obj)) {
+      return pad + JSON.stringify(obj);
+    }
+    return pad + obj;
+  }
+  if (Array.isArray(obj)) {
+    if (obj.length === 0) return pad + '[]';
+    return obj.map(item => {
+      if (typeof item === 'object' && item !== null) {
+        const inner = jsonToYaml(item, indent + 1).trimStart();
+        return pad + '- ' + inner;
+      }
+      return pad + '- ' + jsonToYaml(item, 0).trimStart();
+    }).join('\n');
+  }
+  if (typeof obj === 'object') {
+    const keys = Object.keys(obj);
+    if (keys.length === 0) return pad + '{}';
+    return keys.map(key => {
+      const val = obj[key];
+      if (val === null || val === undefined) return pad + key + ': null';
+      if (typeof val !== 'object') return pad + key + ': ' + jsonToYaml(val, 0).trimStart();
+      return pad + key + ':\n' + jsonToYaml(val, indent + 1);
+    }).join('\n');
+  }
+  return pad + String(obj);
+}
+
+// Dashboard display mode key in localStorage
+const DASHBOARD_MODE_KEY = 'ai_agent_ha_dashboard_mode';
+
 class AiAgentHaPanel extends LitElement {
   static get properties() {
     return {
@@ -463,6 +505,15 @@ class AiAgentHaPanel extends LitElement {
       .thinking-toggle input {
         margin: 0;
       }
+      .dashboard-display-select {
+        background: var(--card-background-color, #1e1e2e);
+        color: var(--primary-text-color);
+        border: 1px solid var(--divider-color, rgba(255,255,255,0.15));
+        border-radius: 4px;
+        font-size: 11px;
+        padding: 1px 4px;
+        cursor: pointer;
+      }
       .thinking-panel {
         border: 1px dashed var(--divider-color);
         border-radius: 10px;
@@ -739,6 +790,42 @@ class AiAgentHaPanel extends LitElement {
       .dashboard-meta {
         font-size: 0.78rem;
         color: var(--secondary-text-color);
+        display: flex;
+        align-items: center;
+        gap: 12px;
+      }
+      .dashboard-mode-toggle {
+        cursor: pointer;
+        color: var(--primary-color, #4fc3f7);
+        font-size: 0.78rem;
+        text-decoration: none;
+        margin-left: auto;
+      }
+      .dashboard-mode-toggle:hover {
+        text-decoration: underline;
+      }
+      .dashboard-yaml-view {
+        margin: 8px 0;
+      }
+      .dashboard-yaml-code {
+        background: var(--code-editor-background-color, #1e1e2e);
+        color: var(--primary-text-color);
+        border-radius: 8px;
+        padding: 12px;
+        font-size: 0.8rem;
+        font-family: 'Fira Code', 'Consolas', 'Monaco', monospace;
+        overflow-x: auto;
+        max-height: 400px;
+        overflow-y: auto;
+        white-space: pre;
+        margin: 0;
+        border: 1px solid var(--divider-color, rgba(255,255,255,0.1));
+      }
+      .dashboard-yaml-actions {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        margin-top: 8px;
       }
       .dashboard-suggestion-card .card-actions {
         display: flex;
@@ -861,6 +948,8 @@ class AiAgentHaPanel extends LitElement {
     this._promptHistory = [];
     this._promptHistoryLoaded = false;
     this._lastResponseTs = 0; // Track last processed response timestamp
+    this._dashboardDisplayMode = localStorage.getItem(DASHBOARD_MODE_KEY) || 'visual'; // 'visual' or 'yaml'
+    this._perMessageYamlToggle = {}; // per-message overrides: msgIndex -> 'visual'|'yaml'
     this._showPredefinedPrompts = true;
     this._showPromptHistory = true;
     this._predefinedPrompts = [
@@ -1407,15 +1496,44 @@ class AiAgentHaPanel extends LitElement {
                     </div>
                     <div class="card-content">
 
-                      ${this._renderDashboardPreview(msg.dashboard)}
-
-                      <div class="dashboard-meta">
-                        ${(() => {
-                          const views = msg.dashboard.views || [];
-                          const totalCards = views.reduce((sum, v) => sum + (v.cards ? v.cards.length : 0), 0);
-                          return `${views.length} view${views.length !== 1 ? 's' : ''} \u00b7 ${totalCards} card${totalCards !== 1 ? 's' : ''}`;
-                        })()}
-                      </div>
+                      ${(() => {
+                        const msgIdx = this._messages.indexOf(msg);
+                        const mode = this._perMessageYamlToggle[msgIdx] || this._dashboardDisplayMode;
+                        if (mode === 'yaml') {
+                          // ── YAML mode ──
+                          return html`
+                            <div class="dashboard-yaml-view">
+                              <pre class="dashboard-yaml-code"><code>${jsonToYaml(msg.dashboard)}</code></pre>
+                              <div class="dashboard-yaml-actions">
+                                <ha-button
+                                  @click=${() => {
+                                    const yaml = jsonToYaml(msg.dashboard);
+                                    navigator.clipboard.writeText(yaml).then(() => {
+                                      this._copyFeedback = msgIdx;
+                                      this.requestUpdate();
+                                      setTimeout(() => { this._copyFeedback = null; this.requestUpdate(); }, 2000);
+                                    });
+                                  }}
+                                >${this._copyFeedback === msgIdx ? 'Copied!' : 'Copy YAML'}</ha-button>
+                                <a class="dashboard-mode-toggle" @click=${() => { this._perMessageYamlToggle = {...this._perMessageYamlToggle, [msgIdx]: 'visual'}; this.requestUpdate(); }}>Show Visual</a>
+                              </div>
+                            </div>
+                          `;
+                        } else {
+                          // ── Visual mode (default) ──
+                          return html`
+                            ${this._renderDashboardPreview(msg.dashboard)}
+                            <div class="dashboard-meta">
+                              ${(() => {
+                                const views = msg.dashboard.views || [];
+                                const totalCards = views.reduce((sum, v) => sum + (v.cards ? v.cards.length : 0), 0);
+                                return `${views.length} view${views.length !== 1 ? 's' : ''} \u00b7 ${totalCards} card${totalCards !== 1 ? 's' : ''}`;
+                              })()}
+                              <a class="dashboard-mode-toggle" @click=${() => { this._perMessageYamlToggle = {...this._perMessageYamlToggle, [msgIdx]: 'yaml'}; this.requestUpdate(); }}>Show YAML</a>
+                            </div>
+                          `;
+                        }
+                      })()}
 
                       ${this._dashboardChangeActive === msg.dashboard ? html`
                         <div class="dashboard-change-row">
@@ -1536,6 +1654,22 @@ class AiAgentHaPanel extends LitElement {
                   @change=${(e) => this._toggleShowThinking(e)}
                 />
                 Show thinking
+              </label>
+              <label class="thinking-toggle" title="Default display mode for dashboard suggestions">
+                <select
+                  class="dashboard-display-select"
+                  .value=${this._dashboardDisplayMode}
+                  @change=${(e) => {
+                    this._dashboardDisplayMode = e.target.value;
+                    localStorage.setItem(DASHBOARD_MODE_KEY, e.target.value);
+                    this._perMessageYamlToggle = {};
+                    this.requestUpdate();
+                  }}
+                >
+                  <option value="visual">Visual</option>
+                  <option value="yaml">YAML</option>
+                </select>
+                Dashboard
               </label>
 
               <ha-button
@@ -1761,122 +1895,85 @@ class AiAgentHaPanel extends LitElement {
       if (this._showThinking && this._debugInfo) {
         this._thinkingExpanded = true;
       }
-    if (event.data.success) {
-      // Check if the answer is empty
-      if (!event.data.answer || event.data.answer.trim() === '') {
-        console.warn("AI agent returned empty response");
+
+      if (event.data.success) {
+        // ── Typed-envelope handler ──────────────────────────────
+        // Agent.py now classifies every response into a typed
+        // envelope: { type, message, dashboard?, automation? }.
+        // We switch on `type` instead of parsing raw JSON.
+        const envType = event.data.type || 'text';
+        const envMessage = event.data.message || event.data.answer || '';
+
+        // Check for empty response
+        if (!envMessage && !event.data.dashboard && !event.data.automation) {
+          console.warn("AI agent returned empty response");
+          this._messages = [
+            ...this._messages,
+            { type: 'assistant', text: 'I received your message but I\'m not sure how to respond. Could you please try rephrasing your question?' }
+          ];
+          return;
+        }
+
+        let message = { type: 'assistant', text: envMessage };
+
+        // Capture thinking content
+        if (event.data.thinking) {
+          message.thinking = event.data.thinking;
+          message.thinking_duration = event.data.thinking_duration || null;
+        }
+
+        switch (envType) {
+          case 'dashboard':
+            console.debug('Envelope: dashboard', event.data.dashboard);
+            message.dashboard = event.data.dashboard;
+            message.text = envMessage || 'I created a dashboard configuration for you. Would you like me to deploy it?';
+            break;
+
+          case 'automation':
+            console.debug('Envelope: automation', event.data.automation);
+            message.automation = event.data.automation;
+            message.text = envMessage || 'I found an automation that might help. Would you like me to create it?';
+            break;
+
+          case 'text':
+          default:
+            console.debug('Envelope: text');
+            // Backward compat: if no typed envelope, try legacy extractAllJson
+            if (!event.data.type && event.data.answer) {
+              try {
+                const { actionable: parsed, all: allObjects } = extractAllJson(event.data.answer);
+                const tempReadings = extractTemperatureChart(allObjects);
+                if (tempReadings) {
+                  message.chartData = { type: 'temperature', readings: tempReadings };
+                }
+                if (parsed) {
+                  if (parsed.request_type === 'automation_suggestion' && parsed.automation) {
+                    message.automation = parsed.automation;
+                    message.text = parsed.message || envMessage;
+                  } else if (parsed.request_type === 'dashboard_suggestion' && parsed.dashboard) {
+                    message.dashboard = parsed.dashboard;
+                    message.text = parsed.message || envMessage;
+                  } else if (parsed.message || parsed.response) {
+                    message.text = parsed.message || parsed.response;
+                  }
+                }
+              } catch (e) {
+                console.debug('Legacy JSON extraction fallback error:', e);
+              }
+            }
+            break;
+        }
+
+        console.debug('Adding message to UI:', message);
+        this._messages = [...this._messages, message];
+        this._saveHistoryToStorage();
+      } else {
+        this._error = event.data.error || 'An error occurred';
         this._messages = [
           ...this._messages,
-          { type: 'assistant', text: 'I received your message but I\'m not sure how to respond. Could you please try rephrasing your question?' }
+          { type: 'assistant', text: `Error: ${this._error}` }
         ];
-        return;
       }
-
-      let message = { type: 'assistant', text: event.data.answer, _rawAnswer: event.data.answer };
-
-      // Capture thinking content from response
-      if (event.data.thinking) {
-        message.thinking = event.data.thinking;
-        message.thinking_duration = event.data.thinking_duration || null;
-      }
-
-      // Check if the response contains an automation or dashboard suggestion
-      try {
-        console.debug("Attempting to parse response:", event.data.answer?.substring(0, 200));
-        let answerText = event.data.answer || '';
-        // If the answer is a JSON-encoded string (double-encoded), unwrap one level
-        // so extractAllJson can find the embedded objects.
-        if (answerText.startsWith('"') || answerText.startsWith("'")) {
-          try {
-            const unwrapped = JSON.parse(answerText);
-            if (typeof unwrapped === 'string') answerText = unwrapped;
-          } catch (_) { /* not double-encoded, use as-is */ }
-        }
-        let { actionable: response, all: allObjects } = extractAllJson(answerText);
-        // If extractAllJson found nothing actionable, try parsing the whole answer
-        // as a single JSON object (common when agent.py returns clean JSON)
-        if (!response && answerText.trim().startsWith('{')) {
-          try {
-            const parsed = JSON.parse(answerText);
-            if (parsed && parsed.request_type) {
-              response = parsed;
-              allObjects = [parsed];
-            } else if (parsed && typeof parsed.response === 'string') {
-              // final_response wrapper — extract from inner response
-              const inner = extractAllJson(parsed.response);
-              if (inner.actionable) { response = inner.actionable; allObjects = inner.all; }
-            }
-          } catch (_) { /* continue with original */ }
-        }
-        console.debug("Extracted actionable JSON:", response);
-
-        // Detect temperature chart data from intermediate data objects
-        const tempReadings = extractTemperatureChart(allObjects);
-        if (tempReadings) {
-          message.chartData = { type: 'temperature', readings: tempReadings };
-        }
-
-        if (response) {
-          if (response.request_type === 'automation_suggestion') {
-            console.debug("Found automation suggestion");
-            message.automation = response.automation;
-            message.text = response.message || 'I found an automation that might help you. Would you like me to create it?';
-          } else if (response.request_type === 'dashboard_suggestion') {
-            console.debug("Found dashboard suggestion:", response.dashboard);
-            message.dashboard = response.dashboard;
-            message.text = response.message || 'I created a dashboard configuration for you. Would you like me to create it?';
-          } else if (response.request_type === 'final_response') {
-            message.text = response.response || response.message || event.data.answer;
-          } else if (response.message) {
-            message.text = response.message;
-          } else if (response.response) {
-            message.text = response.response;
-          }
-        }
-      } catch (e) {
-        console.debug("Response parsing error:", e);
-      }
-
-      // Safety: if dashboard was found but text still looks like raw JSON, replace it
-      if (message.dashboard && message.text && message.text.trim().startsWith('{')) {
-        message.text = 'I created a dashboard for you. Review it below.';
-      }
-
-      // YAML / markdown bleed guard: if text looks like it contains a dashboard
-      // response wrapped in prose, code fences, or YAML, try to extract it.
-      if (!message.dashboard && message.text) {
-        const trimmed = message.text.trim();
-        const looksLikeDashboard = /^(dashboard:|title:|views:)/m.test(trimmed)
-          || /```(?:json|yaml)?\s*[\s\S]*?(dashboard|views|cards)/i.test(trimmed);
-        if (looksLikeDashboard) {
-          const recovered = extractJSONFromText(trimmed);
-          if (recovered && typeof recovered === 'object') {
-            // Unwrap top-level "dashboard" key if present
-            const dash = recovered.dashboard || recovered;
-            if (dash.views || dash.cards || dash.title) {
-              console.warn('Recovered dashboard from YAML/markdown bleed in message text');
-              message.dashboard = dash;
-              message.text = recovered.message || 'I created a dashboard for you. Review it below.';
-            }
-          }
-          // If extraction failed, still suppress the raw YAML/markdown
-          if (!message.dashboard) {
-            console.warn('Detected YAML dashboard bleed in message text — suppressing raw display');
-            message.text = 'The AI returned a dashboard in an unexpected format. Please try your request again.';
-          }
-        }
-      }
-
-      console.debug("Adding message to UI:", message);
-      this._messages = [...this._messages, message];
-      this._saveHistoryToStorage();
-    } else {
-      this._error = event.data.error || 'An error occurred';
-      this._messages = [
-        ...this._messages,
-        { type: 'assistant', text: `Error: ${this._error}` }
-      ];
-    }
     } catch (error) {
       console.error("Error in _handleLlamaResponse:", error);
       this._clearLoadingState();
