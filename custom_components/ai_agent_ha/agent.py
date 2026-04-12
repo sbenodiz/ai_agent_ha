@@ -161,10 +161,37 @@ def _classify_response(response_data: dict) -> dict:
         }
 
     if rt == "final_response":
+        # Some models put the dashboard/automation directly alongside
+        # request_type: "final_response" instead of nesting it in
+        # the "response" string.  Check for that first.
+        if response_data.get("dashboard"):
+            return {
+                "type": "dashboard",
+                "message": response_data.get("message", response_data.get("response", "")),
+                "dashboard": response_data["dashboard"],
+            }
+        if response_data.get("automation"):
+            return {
+                "type": "automation",
+                "message": response_data.get("message", response_data.get("response", "")),
+                "automation": response_data["automation"],
+            }
         raw = str(response_data.get("response", ""))
         embedded = _extract_actionable_json(raw)
         if embedded:
             return _classify_response(embedded)  # recurse once
+        # Last resort: the "response" value might itself be a dict that
+        # was auto-stringified.  Try parsing it.
+        resp_val = response_data.get("response")
+        if isinstance(resp_val, dict):
+            if resp_val.get("request_type") in ("dashboard_suggestion", "automation_suggestion"):
+                return _classify_response(resp_val)
+            if resp_val.get("dashboard"):
+                return {
+                    "type": "dashboard",
+                    "message": resp_val.get("message", ""),
+                    "dashboard": resp_val["dashboard"],
+                }
         return {
             "type": "text",
             "message": raw,
