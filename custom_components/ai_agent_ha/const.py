@@ -1,7 +1,7 @@
 """Constants for the AI Agent HA integration."""
 
 DOMAIN = "ai_agent_ha"
-VERSION = "1.2.13"
+VERSION = "1.2.14"
 CONF_API_KEY = "api_key"
 CONF_WEATHER_ENTITY = "weather_entity"
 
