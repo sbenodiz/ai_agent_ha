@@ -1635,6 +1635,13 @@ class AiAgentHaPanel extends LitElement {
     // can distinguish stale vs fresh responses in the state entity.
     const queryStartTs = this._lastResponseTs;
 
+    // Start fallback poll *before* awaiting the service call.
+    // callService is awaited and may block for 10-30s on slow LLM
+    // round-trips — if the event fires while we're still awaiting,
+    // the event handler picks it up and cancels the poll.  If not,
+    // the poll recovers the response from the state entity.
+    this._startFallbackPoll(queryStartTs);
+
     try {
       console.debug("Calling ai_agent_ha service");
       await this.hass.callService('ai_agent_ha', 'query', {
@@ -1643,13 +1650,18 @@ class AiAgentHaPanel extends LitElement {
         debug: this._showThinking
       });
 
-      // ── Fallback poll ──────────────────────────────────────────
-      // If the event bus delivery is missed (race condition, slow
-      // round-trip, etc.) we poll the state entity every 3 s for up
-      // to 300 s.  If we find a newer response, we synthesise a
-      // fake event and feed it into the existing handler.
-      this._startFallbackPoll(queryStartTs);
-
+      // Service call resolved — if we're still loading, the event
+      // may have fired while JS was blocked on the await.  Do an
+      // immediate one-shot check of the state entity.
+      if (this._isLoading) {
+        try {
+          const snap = await this.hass.callWS({ type: 'ai_agent_ha/get_last_response' });
+          if (snap && (snap._ts || 0) > queryStartTs && (snap._ts || 0) > this._lastResponseTs) {
+            console.debug('Post-await recovery: found response in state entity');
+            this._handleLlamaResponse({ data: snap });
+          }
+        } catch (_) { /* poll will catch it */ }
+      }
     } catch (error) {
       console.error("Error calling service:", error);
       this._clearLoadingState();
@@ -1994,13 +2006,13 @@ class AiAgentHaPanel extends LitElement {
     }, 300000);
 
     const queryStartTs = this._lastResponseTs;
+    this._startFallbackPoll(queryStartTs);
     try {
       await this.hass.callService('ai_agent_ha', 'query', {
         prompt: `Please update the "${safeTitle}" dashboard with the following changes: ${changeText}. Return a complete updated dashboard_suggestion JSON.`,
         provider: this._selectedProvider,
         debug: this._showThinking
       });
-      this._startFallbackPoll(queryStartTs);
     } catch (e) {
       console.error('Error requesting dashboard change:', e);
       this._clearLoadingState();
