@@ -159,9 +159,7 @@ class AiAgentHaPanel extends LitElement {
       _isStreaming: { type: Boolean, reflect: false, attribute: false },
       _streamingText: { type: String, reflect: false, attribute: false },
       _dashboardChangeActive: { type: Object, reflect: false, attribute: false },
-      _dashboardChangeText: { type: String, reflect: false, attribute: false },
-      _subscriptionsReady: { type: Boolean, reflect: false, attribute: false },
-      _streamingEnabled: { type: Boolean, reflect: false, attribute: false }
+      _dashboardChangeText: { type: String, reflect: false, attribute: false }
     };
   }
 
@@ -898,9 +896,6 @@ class AiAgentHaPanel extends LitElement {
     this._streamEndUnsub = null;
     this._dashboardChangeActive = null;
     this._dashboardChangeText = '';
-    this._subscriptionsReady = false;
-    this._streamingEnabled = false;
-    this._responseUnsub = null;
     console.debug("AI Agent HA Panel constructor called");
   }
 
@@ -996,27 +991,22 @@ class AiAgentHaPanel extends LitElement {
     console.debug("AI Agent HA Panel connected");
     if (this.hass && !this._eventSubscriptionSetup) {
       this._eventSubscriptionSetup = true;
+      this.hass.connection.subscribeEvents(
+        (event) => this._handleLlamaResponse(event),
+        'ai_agent_ha_response'
+      );
+      console.debug("Event subscription set up in connectedCallback()");
 
-      // Await all subscriptions before allowing user interaction
-      try {
-        this._responseUnsub = await this.hass.connection.subscribeEvents(
-          (event) => this._handleLlamaResponse(event),
-          'ai_agent_ha_response'
-        );
-        this._streamChunkUnsub = await this.hass.connection.subscribeEvents(
-          (event) => this._handleStreamChunk(event),
-          'ai_agent_ha/stream_chunk'
-        );
-        this._streamEndUnsub = await this.hass.connection.subscribeEvents(
-          (event) => this._handleStreamEnd(event),
-          'ai_agent_ha/stream_end'
-        );
-        this._subscriptionsReady = true;
-        console.debug("Event subscriptions set up in connectedCallback()");
-      } catch (e) {
-        console.error('Failed to set up event subscriptions:', e);
-        this._subscriptionsReady = true; // allow interaction even if subscription fails
-      }
+      // Subscribe to streaming events
+      this._streamChunkUnsub = this.hass.connection.subscribeEvents(
+        (event) => this._handleStreamChunk(event),
+        'ai_agent_ha/stream_chunk'
+      );
+      this._streamEndUnsub = this.hass.connection.subscribeEvents(
+        (event) => this._handleStreamEnd(event),
+        'ai_agent_ha/stream_end'
+      );
+      console.debug("Streaming event subscriptions set up");
 
       // Load prompt history from Home Assistant storage
       await this._loadPromptHistory();
@@ -1045,15 +1035,12 @@ class AiAgentHaPanel extends LitElement {
     if (this._logoutHandler) {
       window.removeEventListener('hass-logout', this._logoutHandler);
     }
-    // Clean up event subscriptions (resolved unsub functions, not Promises)
-    if (this._responseUnsub) {
-      try { this._responseUnsub(); } catch (_) {}
-    }
+    // Clean up streaming subscriptions
     if (this._streamChunkUnsub) {
-      try { this._streamChunkUnsub(); } catch (_) {}
+      try { this._streamChunkUnsub.then(unsub => unsub()); } catch (_) {}
     }
     if (this._streamEndUnsub) {
-      try { this._streamEndUnsub(); } catch (_) {}
+      try { this._streamEndUnsub.then(unsub => unsub()); } catch (_) {}
     }
   }
 
@@ -1068,17 +1055,11 @@ class AiAgentHaPanel extends LitElement {
     // Set up event subscription when hass becomes available
     if (changedProps.has('hass') && this.hass && !this._eventSubscriptionSetup) {
       this._eventSubscriptionSetup = true;
-      try {
-        this._responseUnsub = await this.hass.connection.subscribeEvents(
-          (event) => this._handleLlamaResponse(event),
-          'ai_agent_ha_response'
-        );
-        this._subscriptionsReady = true;
-        console.debug("Event subscription set up in updated()");
-      } catch (e) {
-        console.error('Failed to set up event subscription in updated():', e);
-        this._subscriptionsReady = true;
-      }
+      this.hass.connection.subscribeEvents(
+        (event) => this._handleLlamaResponse(event),
+        'ai_agent_ha_response'
+      );
+      console.debug("Event subscription set up in updated()");
     }
 
     // Load providers when hass becomes available
@@ -1121,7 +1102,6 @@ class AiAgentHaPanel extends LitElement {
         if (providers.length > 0) {
           this._availableProviders = providers;
           this._persistenceEnabled = persistenceEnabled;
-          this._streamingEnabled = streamingEnabled;
 
           console.debug("Available AI providers:", this._availableProviders);
           console.debug("Chat persistence enabled:", this._persistenceEnabled);
@@ -1609,16 +1589,6 @@ class AiAgentHaPanel extends LitElement {
     const prompt = promptEl.value.trim();
     if (!prompt || this._isLoading) return;
 
-    // Ensure event subscription is active before sending
-    if (!this._subscriptionsReady) {
-      console.warn('Subscriptions not ready yet, waiting...');
-      let waited = 0;
-      while (!this._subscriptionsReady && waited < 3000) {
-        await new Promise(r => setTimeout(r, 100));
-        waited += 100;
-      }
-    }
-
     console.debug("Sending message:", prompt);
     console.debug("Sending message with provider:", this._selectedProvider);
 
@@ -1639,7 +1609,9 @@ class AiAgentHaPanel extends LitElement {
       clearTimeout(this._serviceCallTimeout);
     }
 
-    const timeoutMs = 120000;  // 2 minute timeout — balanced for all providers
+    // Set timeout to clear loading state after 300 seconds
+    // Increased from 60s to support local models (LM Studio, Ollama) which
+    // may take longer to generate responses on local hardware.
     this._serviceCallTimeout = setTimeout(() => {
       if (this._isLoading) {
         console.warn("Service call timeout - clearing loading state");
@@ -1651,27 +1623,15 @@ class AiAgentHaPanel extends LitElement {
         }];
         this.requestUpdate();
       }
-    }, timeoutMs);
+    }, 300000); // 300 second timeout (matches backend aiohttp timeout)
 
     try {
       console.debug("Calling ai_agent_ha service");
-      // Fire-and-forget: do NOT use return_response.
-      // Response arrives via ai_agent_ha_response event subscription.
-      this.hass.callService('ai_agent_ha', 'query', {
+      await this.hass.callService('ai_agent_ha', 'query', {
         prompt: prompt,
         provider: this._selectedProvider,
         debug: this._showThinking
-      }).catch(error => {
-        console.error("Service call failed:", error);
-        this._clearLoadingState();
-        this._error = error.message || 'An error occurred while processing your request';
-        this._messages = [...this._messages, {
-          type: 'assistant',
-          text: `Error: ${this._error}`
-        }];
-        this.requestUpdate();
       });
-      // Do NOT await — response comes via event bus
     } catch (error) {
       console.error("Error calling service:", error);
       this._clearLoadingState();
@@ -1708,8 +1668,8 @@ class AiAgentHaPanel extends LitElement {
   }
 
   _handleLlamaResponse(event) {
-    console.debug("Received response event:", event);
-
+    console.debug("Received llama response:", event);
+    
     try {
       this._clearLoadingState();
       this._isStreaming = false;
@@ -1718,99 +1678,98 @@ class AiAgentHaPanel extends LitElement {
       if (this._showThinking && this._debugInfo) {
         this._thinkingExpanded = true;
       }
-
-      if (event.data.success) {
-        // Check if the answer is empty
-        if (!event.data.answer || event.data.answer.trim() === '') {
-          console.warn("AI agent returned empty response");
-          this._messages = [
-            ...this._messages,
-            { type: 'assistant', text: 'I received your message but I\'m not sure how to respond. Could you please try rephrasing your question?' }
-          ];
-          return;
-        }
-
-        let message = { type: 'assistant', text: event.data.answer, _rawAnswer: event.data.answer };
-
-        // Capture thinking content from response
-        if (event.data.thinking) {
-          message.thinking = event.data.thinking;
-          message.thinking_duration = event.data.thinking_duration || null;
-        }
-
-        // Check if the response contains an automation or dashboard suggestion
-        try {
-          console.debug("Attempting to parse response:", event.data.answer?.substring(0, 200));
-          const { actionable: response, all: allObjects } = extractAllJson(event.data.answer || '');
-          console.debug("Extracted actionable JSON:", response);
-
-          // Detect temperature chart data from intermediate data objects
-          const tempReadings = extractTemperatureChart(allObjects);
-          if (tempReadings) {
-            message.chartData = { type: 'temperature', readings: tempReadings };
-          }
-
-          if (response) {
-            if (response.request_type === 'automation_suggestion') {
-              console.debug("Found automation suggestion");
-              message.automation = response.automation;
-              message.text = response.message || 'I found an automation that might help you. Would you like me to create it?';
-            } else if (response.request_type === 'dashboard_suggestion') {
-              console.debug("Found dashboard suggestion:", response.dashboard);
-              message.dashboard = response.dashboard;
-              message.text = response.message || 'I created a dashboard configuration for you. Would you like me to create it?';
-            } else if (response.request_type === 'final_response') {
-              message.text = response.response || response.message || event.data.answer;
-            } else if (response.message) {
-              message.text = response.message;
-            } else if (response.response) {
-              message.text = response.response;
-            }
-          }
-        } catch (e) {
-          console.debug("Response parsing error:", e);
-        }
-
-        // Safety: if dashboard was found but text still looks like raw JSON, replace it
-        if (message.dashboard && message.text && message.text.trim().startsWith('{')) {
-          message.text = 'I created a dashboard for you. Review it below.';
-        }
-
-        // YAML / markdown bleed guard: if text looks like it contains a dashboard
-        // response wrapped in prose, code fences, or YAML, try to extract it.
-        if (!message.dashboard && message.text) {
-          const trimmed = message.text.trim();
-          const looksLikeDashboard = /^(dashboard:|title:|views:)/m.test(trimmed)
-            || /```(?:json|yaml)?\s*[\s\S]*?(dashboard|views|cards)/i.test(trimmed);
-          if (looksLikeDashboard) {
-            const recovered = extractJSONFromText(trimmed);
-            if (recovered && typeof recovered === 'object') {
-              // Unwrap top-level "dashboard" key if present
-              const dash = recovered.dashboard || recovered;
-              if (dash.views || dash.cards || dash.title) {
-                console.warn('Recovered dashboard from YAML/markdown bleed in message text');
-                message.dashboard = dash;
-                message.text = recovered.message || 'I created a dashboard for you. Review it below.';
-              }
-            }
-            // If extraction failed, still suppress the raw YAML/markdown
-            if (!message.dashboard) {
-              console.warn('Detected YAML dashboard bleed in message text — suppressing raw display');
-              message.text = 'The AI returned a dashboard in an unexpected format. Please try your request again.';
-            }
-          }
-        }
-
-        console.debug("Adding message to UI:", message);
-        this._messages = [...this._messages, message];
-        this._saveHistoryToStorage();
-      } else {
-        this._error = event.data.error || 'An error occurred';
+    if (event.data.success) {
+      // Check if the answer is empty
+      if (!event.data.answer || event.data.answer.trim() === '') {
+        console.warn("AI agent returned empty response");
         this._messages = [
           ...this._messages,
-          { type: 'assistant', text: `Error: ${this._error}` }
+          { type: 'assistant', text: 'I received your message but I\'m not sure how to respond. Could you please try rephrasing your question?' }
         ];
+        return;
       }
+
+      let message = { type: 'assistant', text: event.data.answer, _rawAnswer: event.data.answer };
+
+      // Capture thinking content from response
+      if (event.data.thinking) {
+        message.thinking = event.data.thinking;
+        message.thinking_duration = event.data.thinking_duration || null;
+      }
+
+      // Check if the response contains an automation or dashboard suggestion
+      try {
+        console.debug("Attempting to parse response:", event.data.answer?.substring(0, 200));
+        const { actionable: response, all: allObjects } = extractAllJson(event.data.answer || '');
+        console.debug("Extracted actionable JSON:", response);
+
+        // Detect temperature chart data from intermediate data objects
+        const tempReadings = extractTemperatureChart(allObjects);
+        if (tempReadings) {
+          message.chartData = { type: 'temperature', readings: tempReadings };
+        }
+
+        if (response) {
+          if (response.request_type === 'automation_suggestion') {
+            console.debug("Found automation suggestion");
+            message.automation = response.automation;
+            message.text = response.message || 'I found an automation that might help you. Would you like me to create it?';
+          } else if (response.request_type === 'dashboard_suggestion') {
+            console.debug("Found dashboard suggestion:", response.dashboard);
+            message.dashboard = response.dashboard;
+            message.text = response.message || 'I created a dashboard configuration for you. Would you like me to create it?';
+          } else if (response.request_type === 'final_response') {
+            message.text = response.response || response.message || event.data.answer;
+          } else if (response.message) {
+            message.text = response.message;
+          } else if (response.response) {
+            message.text = response.response;
+          }
+        }
+      } catch (e) {
+        console.debug("Response parsing error:", e);
+      }
+
+      // Safety: if dashboard was found but text still looks like raw JSON, replace it
+      if (message.dashboard && message.text && message.text.trim().startsWith('{')) {
+        message.text = 'I created a dashboard for you. Review it below.';
+      }
+
+      // YAML / markdown bleed guard: if text looks like it contains a dashboard
+      // response wrapped in prose, code fences, or YAML, try to extract it.
+      if (!message.dashboard && message.text) {
+        const trimmed = message.text.trim();
+        const looksLikeDashboard = /^(dashboard:|title:|views:)/m.test(trimmed)
+          || /```(?:json|yaml)?\s*[\s\S]*?(dashboard|views|cards)/i.test(trimmed);
+        if (looksLikeDashboard) {
+          const recovered = extractJSONFromText(trimmed);
+          if (recovered && typeof recovered === 'object') {
+            // Unwrap top-level "dashboard" key if present
+            const dash = recovered.dashboard || recovered;
+            if (dash.views || dash.cards || dash.title) {
+              console.warn('Recovered dashboard from YAML/markdown bleed in message text');
+              message.dashboard = dash;
+              message.text = recovered.message || 'I created a dashboard for you. Review it below.';
+            }
+          }
+          // If extraction failed, still suppress the raw YAML/markdown
+          if (!message.dashboard) {
+            console.warn('Detected YAML dashboard bleed in message text — suppressing raw display');
+            message.text = 'The AI returned a dashboard in an unexpected format. Please try your request again.';
+          }
+        }
+      }
+
+      console.debug("Adding message to UI:", message);
+      this._messages = [...this._messages, message];
+      this._saveHistoryToStorage();
+    } else {
+      this._error = event.data.error || 'An error occurred';
+      this._messages = [
+        ...this._messages,
+        { type: 'assistant', text: `Error: ${this._error}` }
+      ];
+    }
     } catch (error) {
       console.error("Error in _handleLlamaResponse:", error);
       this._clearLoadingState();
@@ -2100,7 +2059,7 @@ class AiAgentHaPanel extends LitElement {
       const viewWord = newViews.length !== 1 ? 'views' : 'view';
       this._messages = [...this._messages, {
         type: 'assistant',
-        text: `Added ${newViews.length} ${viewWord} to "${targetName}" successfully. Navigate to the dashboard to see the new tab${newViews.length !== 1 ? 's' : ''}.`
+        text: `Added ${newViews.length} ${viewWord} to "${targetName}" successfully.`
       }];
     } catch (error) {
       console.error('Error adding view to dashboard:', error);
