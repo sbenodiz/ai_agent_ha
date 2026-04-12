@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import json
 import logging
+import time
 
 import voluptuous as vol
 from homeassistant.components import websocket_api
@@ -245,6 +247,32 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         raise ConfigEntryNotReady(f"Error setting up AI Agent HA: {err}")
 
     # Modify the query service handler to use the correct provider
+    # ── State-entity response channel ──────────────────────────────
+    # The event bus is fire-and-forget; if the frontend panel isn't
+    # listening when the event fires (slow LLM round-trips, browser
+    # refresh) the response is lost.  We now *also* persist every
+    # response into a state entity so the panel can poll it as a
+    # fallback.
+    RESPONSE_ENTITY = f"sensor.{DOMAIN}_last_response"
+
+    def _write_response_state(result: dict) -> None:
+        """Persist *result* to a HA state entity for frontend fallback."""
+        try:
+            ts = time.time()
+            # Truncate large payloads for state — HA limits attribute size.
+            payload = json.dumps(result, default=str)
+            if len(payload) > 16000:
+                # Keep answer + success/error but drop debug blob
+                trimmed = {k: v for k, v in result.items() if k != "debug"}
+                payload = json.dumps(trimmed, default=str)
+            hass.states.async_set(
+                RESPONSE_ENTITY,
+                str(ts),  # state = timestamp (changes each response)
+                {"response_json": payload, "ts": ts},
+            )
+        except Exception as exc:  # noqa: BLE001
+            _LOGGER.debug("Could not write response state: %s", exc)
+
     async def async_handle_query(call):
         """Handle the query service call."""
         try:
@@ -254,6 +282,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     "No AI agents available. Please configure the integration first."
                 )
                 result = {"error": "No AI agents configured"}
+                _write_response_state(result)
                 hass.bus.async_fire("ai_agent_ha_response", result)
                 return
 
@@ -264,6 +293,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 if not available_providers:
                     _LOGGER.error("No AI agents available")
                     result = {"error": "No AI agents configured"}
+                    _write_response_state(result)
                     hass.bus.async_fire("ai_agent_ha_response", result)
                     return
                 provider = available_providers[0]
@@ -275,10 +305,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 provider=provider,
                 debug=call.data.get("debug", False),
             )
+            _write_response_state(result)
             hass.bus.async_fire("ai_agent_ha_response", result)
         except Exception as e:
             _LOGGER.error("Query service error: %s", str(e), exc_info=True)
             result = {"error": "Unable to process request. Check Home Assistant logs for details."}
+            _write_response_state(result)
             hass.bus.async_fire("ai_agent_ha_response", result)
 
     async def async_handle_create_automation(call):
@@ -491,6 +523,35 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         connection.send_message(websocket_api.result_message(msg["id"], providers))
 
     websocket_api.async_register_command(hass, ws_get_providers)
+
+    @websocket_api.websocket_command(
+        {vol.Required("type"): "ai_agent_ha/get_last_response"}
+    )
+    @websocket_api.async_response
+    async def ws_get_last_response(hass, connection, msg):
+        """Return the last query response from the state entity.
+
+        The frontend uses this as a fallback when the event-bus delivery
+        is missed (slow LLM round-trips, browser refresh, etc.).
+        """
+        state_obj = hass.states.get(RESPONSE_ENTITY)
+        if state_obj and state_obj.attributes.get("response_json"):
+            try:
+                data = json.loads(state_obj.attributes["response_json"])
+                data["_ts"] = state_obj.attributes.get("ts", 0)
+                connection.send_message(
+                    websocket_api.result_message(msg["id"], data)
+                )
+            except (json.JSONDecodeError, TypeError):
+                connection.send_message(
+                    websocket_api.result_message(msg["id"], None)
+                )
+        else:
+            connection.send_message(
+                websocket_api.result_message(msg["id"], None)
+            )
+
+    websocket_api.async_register_command(hass, ws_get_last_response)
 
     # Register services
     hass.services.async_register(DOMAIN, "query", async_handle_query)
