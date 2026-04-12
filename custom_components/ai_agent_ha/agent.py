@@ -86,8 +86,12 @@ def _extract_json_from_text(text: str) -> Optional[dict]:
     return None
 
 
+_ACTIONABLE_TYPES = frozenset({"dashboard_suggestion", "automation_suggestion"})
+
+
 def _extract_actionable_json(
-    text: str, target_types: tuple = ("dashboard_suggestion", "automation_suggestion")
+    text: str,
+    target_types: tuple = ("dashboard_suggestion", "automation_suggestion"),
 ) -> Optional[dict]:
     """Scan *text* for the last JSON object whose request_type is in *target_types*.
 
@@ -97,18 +101,15 @@ def _extract_actionable_json(
     object that matches one of the target request_types.
     """
     best: Optional[dict] = None
-    # Walk through every '{' and attempt to parse
     idx = 0
     while idx < len(text):
         start = text.find("{", idx)
         if start == -1:
             break
-        # Quick pre-check — does the text near this brace mention a target type?
         snippet = text[start : start + 200]
         if not any(t in snippet for t in target_types):
             idx = start + 1
             continue
-        # Try to parse from this position
         depth = 0
         end = start
         for i in range(start, len(text)):
@@ -128,11 +129,55 @@ def _extract_actionable_json(
                 isinstance(candidate, dict)
                 and candidate.get("request_type") in target_types
             ):
-                best = candidate  # keep scanning — take the last match
+                best = candidate
         except (json.JSONDecodeError, ValueError):
             pass
         idx = end
     return best
+
+
+def _classify_response(response_data: dict) -> dict:
+    """Build a typed envelope from a parsed model response.
+
+    Returns a dict with:
+      - type: "dashboard" | "automation" | "text"
+      - message: human-readable summary
+      - dashboard / automation: the payload (only when applicable)
+    """
+    rt = response_data.get("request_type", "")
+
+    if rt == "dashboard_suggestion":
+        return {
+            "type": "dashboard",
+            "message": response_data.get("message", ""),
+            "dashboard": response_data.get("dashboard", {}),
+        }
+
+    if rt == "automation_suggestion":
+        return {
+            "type": "automation",
+            "message": response_data.get("message", ""),
+            "automation": response_data.get("automation", {}),
+        }
+
+    if rt == "final_response":
+        raw = str(response_data.get("response", ""))
+        embedded = _extract_actionable_json(raw)
+        if embedded:
+            return _classify_response(embedded)  # recurse once
+        return {
+            "type": "text",
+            "message": raw,
+        }
+
+    # Unrecognised — extract message from best-effort fields
+    msg = (
+        response_data.get("response")
+        or response_data.get("message")
+        or response_data.get("answer")
+        or json.dumps(response_data)
+    )
+    return {"type": "text", "message": msg}
 
 
 # === Security Utilities ===
@@ -3839,118 +3884,43 @@ class AiAgentHaAgent:
                             )
                             continue
 
-                        elif response_data.get("request_type") == "final_response":
-                            # Check if the response body embeds a dashboard_suggestion
-                            # (or other actionable JSON).  This happens when the model
-                            # does a multi-step tool call (e.g. entity lookup → dashboard
-                            # generation) and wraps the whole output in final_response.
-                            raw_resp = response_data.get("response", "")
-                            _embedded = _extract_actionable_json(
-                                str(raw_resp),
-                                ("dashboard_suggestion", "automation_suggestion"),
-                            )
-                            if _embedded:
-                                _LOGGER.debug(
-                                    "Extracted embedded %s from final_response",
-                                    _embedded.get("request_type"),
-                                )
-                                # Re-route: store the embedded object as the real answer
-                                self.conversation_history.append(
-                                    {
-                                        "role": "assistant",
-                                        "content": json.dumps(_embedded),
-                                    }
-                                )
-                                result = {
-                                    "success": True,
-                                    "answer": json.dumps(_embedded),
-                                }
-                                if thinking_content:
-                                    result["thinking"] = thinking_content
-                                    result["thinking_duration"] = thinking_duration
-                                result = _with_debug(result)
-                                self._trim_history()
-                                self._set_cached_data(cache_key, result)
-                                return result
-
-                            # Add final response to conversation history
-                            self.conversation_history.append(
-                                {
-                                    "role": "assistant",
-                                    "content": json.dumps(
-                                        response_data
-                                    ),  # Store clean JSON
-                                }
-                            )
-
-                            # Return final response
-                            _LOGGER.debug(
-                                "Received final response: %s",
-                                response_data.get("response"),
-                            )
-                            result = {
-                                "success": True,
-                                "answer": raw_resp,
-                            }
-                            # Attach thinking content if present
-                            if thinking_content:
-                                result["thinking"] = thinking_content
-                                result["thinking_duration"] = thinking_duration
-                            result = _with_debug(result)
-                            self._trim_history()
-                            self._set_cached_data(cache_key, result)
-                            return result
-                        elif (
-                            response_data.get("request_type") == "automation_suggestion"
+                        elif response_data.get("request_type") in (
+                            "final_response",
+                            "dashboard_suggestion",
+                            "automation_suggestion",
                         ):
-                            # Add automation suggestion to conversation history
+                            # ── Typed-envelope classification ──────────────
+                            # _classify_response converts any of the above
+                            # request_types (including final_response that
+                            # embeds a dashboard/automation) into a clean
+                            # {type, message, dashboard?, automation?} dict.
+                            envelope = _classify_response(response_data)
+                            _LOGGER.debug(
+                                "Classified response as type=%s",
+                                envelope.get("type"),
+                            )
+
+                            # Store clean version in conversation history
                             self.conversation_history.append(
                                 {
                                     "role": "assistant",
-                                    "content": json.dumps(
-                                        response_data
-                                    ),  # Store clean JSON
+                                    "content": json.dumps(response_data),
                                 }
                             )
 
-                            # Return automation suggestion
-                            _LOGGER.debug(
-                                "Received automation suggestion: %s",
-                                json.dumps(response_data.get("automation")),
-                            )
+                            # Build result with the envelope fields
                             result = {
                                 "success": True,
-                                "answer": json.dumps(response_data),
+                                "type": envelope["type"],
+                                "message": envelope.get("message", ""),
                             }
-                            if thinking_content:
-                                result["thinking"] = thinking_content
-                                result["thinking_duration"] = thinking_duration
-                            result = _with_debug(result)
-                            self._trim_history()
-                            self._set_cached_data(cache_key, result)
-                            return result
-                        elif (
-                            response_data.get("request_type") == "dashboard_suggestion"
-                        ):
-                            # Add dashboard suggestion to conversation history
-                            self.conversation_history.append(
-                                {
-                                    "role": "assistant",
-                                    "content": json.dumps(
-                                        response_data
-                                    ),  # Store clean JSON
-                                }
-                            )
-
-                            # Return dashboard suggestion
-                            _LOGGER.debug(
-                                "Received dashboard suggestion: %s",
-                                json.dumps(response_data.get("dashboard")),
-                            )
-                            result = {
-                                "success": True,
-                                "answer": json.dumps(response_data),
-                            }
+                            if envelope.get("dashboard"):
+                                result["dashboard"] = envelope["dashboard"]
+                            if envelope.get("automation"):
+                                result["automation"] = envelope["automation"]
+                            # Backward compat: also set "answer" for any
+                            # older panel JS that still reads it
+                            result["answer"] = envelope.get("message", "")
                             if thinking_content:
                                 result["thinking"] = thinking_content
                                 result["thinking_duration"] = thinking_duration
@@ -4150,23 +4120,27 @@ class AiAgentHaAgent:
                             # Go to next iteration to continue the loop
                             continue
 
-                        # Unknown or missing request_type — treat as final_response
+                        # Unknown or missing request_type — classify via envelope
                         # (model returned valid JSON but without a recognised request_type,
                         # e.g. a plain {"message": "..."} or temperature data object)
                         _LOGGER.debug(
-                            "Unrecognised request_type %r — treating as final_response",
+                            "Unrecognised request_type %r — classifying via envelope",
                             response_data.get("request_type"),
                         )
+                        envelope = _classify_response(response_data)
                         self.conversation_history.append(
                             {"role": "assistant", "content": json.dumps(response_data)}
                         )
-                        fallback_text = (
-                            response_data.get("response")
-                            or response_data.get("message")
-                            or response_data.get("answer")
-                            or json.dumps(response_data)
-                        )
-                        result = {"success": True, "answer": fallback_text}
+                        result = {
+                            "success": True,
+                            "type": envelope["type"],
+                            "message": envelope.get("message", ""),
+                            "answer": envelope.get("message", ""),
+                        }
+                        if envelope.get("dashboard"):
+                            result["dashboard"] = envelope["dashboard"]
+                        if envelope.get("automation"):
+                            result["automation"] = envelope["automation"]
                         if thinking_content:
                             result["thinking"] = thinking_content
                             result["thinking_duration"] = thinking_duration
@@ -4277,9 +4251,10 @@ class AiAgentHaAgent:
                         # Try to extract embedded JSON from prose/markdown/YAML response
                         extracted = _extract_json_from_text(response)
                         if extracted and isinstance(extracted, dict):
-                            # If extracted JSON has request_type, use it directly
+                            # If extracted JSON has request_type, classify via envelope
                             if "request_type" in extracted:
                                 _LOGGER.debug("Extracted embedded JSON with request_type from non-JSON response")
+                                envelope = _classify_response(extracted)
                                 self.conversation_history.append(
                                     {
                                         "role": "assistant",
@@ -4288,8 +4263,14 @@ class AiAgentHaAgent:
                                 )
                                 result = {
                                     "success": True,
-                                    "answer": json.dumps(extracted),
+                                    "type": envelope["type"],
+                                    "message": envelope.get("message", ""),
+                                    "answer": envelope.get("message", ""),
                                 }
+                                if envelope.get("dashboard"):
+                                    result["dashboard"] = envelope["dashboard"]
+                                if envelope.get("automation"):
+                                    result["automation"] = envelope["automation"]
                                 if thinking_content:
                                     result["thinking"] = thinking_content
                                     result["thinking_duration"] = thinking_duration
@@ -4312,7 +4293,7 @@ class AiAgentHaAgent:
                                     "request_type": "dashboard_suggestion",
                                     "dashboard": extracted,
                                 }
-                                # Route through the normal dashboard_suggestion path
+                                envelope = _classify_response(response_data)
                                 self.conversation_history.append(
                                     {
                                         "role": "assistant",
@@ -4321,7 +4302,10 @@ class AiAgentHaAgent:
                                 )
                                 result = {
                                     "success": True,
-                                    "answer": json.dumps(response_data),
+                                    "type": "dashboard",
+                                    "message": envelope.get("message", ""),
+                                    "answer": envelope.get("message", ""),
+                                    "dashboard": envelope.get("dashboard", extracted),
                                 }
                                 if thinking_content:
                                     result["thinking"] = thinking_content
@@ -4331,7 +4315,33 @@ class AiAgentHaAgent:
                                 self._set_cached_data(cache_key, result)
                                 return result
 
-                        # If response is not valid JSON, try to wrap it as a final response
+                        # Also try _extract_actionable_json for multi-object text
+                        actionable = _extract_actionable_json(response)
+                        if actionable:
+                            _LOGGER.debug("Extracted actionable JSON from non-JSON response text")
+                            envelope = _classify_response(actionable)
+                            self.conversation_history.append(
+                                {"role": "assistant", "content": json.dumps(actionable)}
+                            )
+                            result = {
+                                "success": True,
+                                "type": envelope["type"],
+                                "message": envelope.get("message", ""),
+                                "answer": envelope.get("message", ""),
+                            }
+                            if envelope.get("dashboard"):
+                                result["dashboard"] = envelope["dashboard"]
+                            if envelope.get("automation"):
+                                result["automation"] = envelope["automation"]
+                            if thinking_content:
+                                result["thinking"] = thinking_content
+                                result["thinking_duration"] = thinking_duration
+                            result = _with_debug(result)
+                            self._trim_history()
+                            self._set_cached_data(cache_key, result)
+                            return result
+
+                        # If response is not valid JSON, wrap as text envelope
                         try:
                             # Truncate extremely long responses to prevent memory issues
                             response_to_wrap = response
@@ -4345,13 +4355,11 @@ class AiAgentHaAgent:
                                     len(response),
                                 )
 
-                            wrapped_response = {
-                                "request_type": "final_response",
-                                "response": response_to_wrap,
-                            }
                             result = {
                                 "success": True,
-                                "answer": json.dumps(wrapped_response),
+                                "type": "text",
+                                "message": response_to_wrap,
+                                "answer": response_to_wrap,
                             }
                             if thinking_content:
                                 result["thinking"] = thinking_content
