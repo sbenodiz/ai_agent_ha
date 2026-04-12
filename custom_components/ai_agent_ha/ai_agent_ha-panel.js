@@ -894,6 +894,7 @@ class AiAgentHaPanel extends LitElement {
     this._streamingText = '';
     this._streamChunkUnsub = null;
     this._streamEndUnsub = null;
+    this._responseUnsub = null;
     this._dashboardChangeActive = null;
     this._dashboardChangeText = '';
     console.debug("AI Agent HA Panel constructor called");
@@ -991,18 +992,18 @@ class AiAgentHaPanel extends LitElement {
     console.debug("AI Agent HA Panel connected");
     if (this.hass && !this._eventSubscriptionSetup) {
       this._eventSubscriptionSetup = true;
-      this.hass.connection.subscribeEvents(
+      this._responseUnsub = await this.hass.connection.subscribeEvents(
         (event) => this._handleLlamaResponse(event),
         'ai_agent_ha_response'
       );
       console.debug("Event subscription set up in connectedCallback()");
 
       // Subscribe to streaming events
-      this._streamChunkUnsub = this.hass.connection.subscribeEvents(
+      this._streamChunkUnsub = await this.hass.connection.subscribeEvents(
         (event) => this._handleStreamChunk(event),
         'ai_agent_ha/stream_chunk'
       );
-      this._streamEndUnsub = this.hass.connection.subscribeEvents(
+      this._streamEndUnsub = await this.hass.connection.subscribeEvents(
         (event) => this._handleStreamEnd(event),
         'ai_agent_ha/stream_end'
       );
@@ -1035,12 +1036,15 @@ class AiAgentHaPanel extends LitElement {
     if (this._logoutHandler) {
       window.removeEventListener('hass-logout', this._logoutHandler);
     }
-    // Clean up streaming subscriptions
+    // Clean up event subscriptions
+    if (this._responseUnsub) {
+      try { this._responseUnsub(); } catch (_) {}
+    }
     if (this._streamChunkUnsub) {
-      try { this._streamChunkUnsub.then(unsub => unsub()); } catch (_) {}
+      try { this._streamChunkUnsub(); } catch (_) {}
     }
     if (this._streamEndUnsub) {
-      try { this._streamEndUnsub.then(unsub => unsub()); } catch (_) {}
+      try { this._streamEndUnsub(); } catch (_) {}
     }
   }
 
@@ -1055,7 +1059,7 @@ class AiAgentHaPanel extends LitElement {
     // Set up event subscription when hass becomes available
     if (changedProps.has('hass') && this.hass && !this._eventSubscriptionSetup) {
       this._eventSubscriptionSetup = true;
-      this.hass.connection.subscribeEvents(
+      this._responseUnsub = await this.hass.connection.subscribeEvents(
         (event) => this._handleLlamaResponse(event),
         'ai_agent_ha_response'
       );
