@@ -1673,7 +1673,9 @@ class AiAgentHaPanel extends LitElement {
       // Process the result directly — eliminates event bus race condition
       if (result) {
         console.debug("Got direct service response:", result);
-        this._processQueryResult({data: result});
+        // callService with return_response wraps in {response: {...}}
+        const responseData = result.response || result;
+        this._processQueryResult({data: responseData});
       }
     } catch (error) {
       console.error("Error calling service:", error);
