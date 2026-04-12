@@ -1712,9 +1712,8 @@ class AiAgentHaAgent:
             '{"request_type":"dashboard_suggestion","message":"Here is your irrigation dashboard.","dashboard":{"title":"Irrigation","url_path":"irrigation","icon":"mdi:sprinkler","show_in_sidebar":true,"views":[{"title":"Zones","cards":[{"type":"entities","title":"Zone Controls","entities":["switch.zone_1","switch.zone_2"]},{"type":"gauge","title":"Soil Moisture","entity":"sensor.soil_moisture","min":0,"max":100}]}]}}\n'
             "^^^ That is the ONLY acceptable format. No YAML. No markdown. No explanation outside JSON.\n\n"
             "WEATHER DASHBOARD EXAMPLE (use get_weather_data() first, then respond with):\n"
-            '{"request_type":"dashboard_suggestion","message":"Here is your weather dashboard.","dashboard":{"title":"Weather","url_path":"weather-dashboard","icon":"mdi:weather-partly-cloudy","show_in_sidebar":true,"views":[{"title":"Current Weather","cards":[{"type":"weather-forecast","entity":"weather.home","show_current":true,"show_forecast":false},{"type":"horizontal-stack","cards":[{"type":"gauge","entity":"weather.home","attribute":"temperature","name":"Temperature","unit":"°F","min":0,"max":120,"needle":true},{"type":"gauge","entity":"weather.home","attribute":"humidity","name":"Humidity","unit":"%","min":0,"max":100,"needle":true}]},{"type":"entities","title":"Details","entities":[{"entity":"weather.home","type":"attribute","attribute":"wind_speed","name":"Wind Speed","icon":"mdi:weather-windy"},{"entity":"weather.home","type":"attribute","attribute":"pressure","name":"Pressure","icon":"mdi:gauge"}]}]}]}}\n'
-            "^^^ Weather dashboard: replace weather.home with actual entity_id from get_weather_data().\n\n"
-            
+            '{"request_type":"dashboard_suggestion","message":"Here is your weather dashboard.","dashboard":{"title":"Weather","url_path":"weather-dashboard","icon":"mdi:weather-partly-cloudy","show_in_sidebar":true,"views":[{"title":"Current Weather","cards":[{"type":"weather-forecast","entity":"weather.home","show_current":true,"show_forecast":false},{"type":"horizontal-stack","cards":[{"type":"gauge","entity":"weather.home","attribute":"temperature","name":"Temperature","unit":"\u00b0F","min":0,"max":120,"needle":true},{"type":"gauge","entity":"weather.home","attribute":"humidity","name":"Humidity","unit":"%","min":0,"max":100,"needle":true}]},{"type":"entities","title":"Details","entities":[{"entity":"weather.home","type":"attribute","attribute":"wind_speed","name":"Wind Speed","icon":"mdi:weather-windy"},{"entity":"weather.home","type":"attribute","attribute":"pressure","name":"Pressure","icon":"mdi:gauge"}]}]}]}}\n'
+            "^^^ Weather dashboard: replace weather.home with actual entity_id from get_weather_data(). ALWAYS use dashboard_suggestion for ANY dashboard request.\n\n"
             "For data requests, use this exact JSON format:\n"
             "{\n"
             '  "request_type": "data_request",\n'
@@ -1844,9 +1843,8 @@ class AiAgentHaAgent:
             '{"request_type":"dashboard_suggestion","message":"Here is your irrigation dashboard.","dashboard":{"title":"Irrigation","url_path":"irrigation","icon":"mdi:sprinkler","show_in_sidebar":true,"views":[{"title":"Zones","cards":[{"type":"entities","title":"Zone Controls","entities":["switch.zone_1","switch.zone_2"]},{"type":"gauge","title":"Soil Moisture","entity":"sensor.soil_moisture","min":0,"max":100}]}]}}\n'
             "^^^ That is the ONLY acceptable format. No YAML. No markdown. No explanation outside JSON.\n\n"
             "WEATHER DASHBOARD EXAMPLE (use get_weather_data() first, then respond with):\n"
-            '{"request_type":"dashboard_suggestion","message":"Here is your weather dashboard.","dashboard":{"title":"Weather","url_path":"weather-dashboard","icon":"mdi:weather-partly-cloudy","show_in_sidebar":true,"views":[{"title":"Current Weather","cards":[{"type":"weather-forecast","entity":"weather.home","show_current":true,"show_forecast":false},{"type":"horizontal-stack","cards":[{"type":"gauge","entity":"weather.home","attribute":"temperature","name":"Temperature","unit":"°F","min":0,"max":120,"needle":true},{"type":"gauge","entity":"weather.home","attribute":"humidity","name":"Humidity","unit":"%","min":0,"max":100,"needle":true}]},{"type":"entities","title":"Details","entities":[{"entity":"weather.home","type":"attribute","attribute":"wind_speed","name":"Wind Speed","icon":"mdi:weather-windy"},{"entity":"weather.home","type":"attribute","attribute":"pressure","name":"Pressure","icon":"mdi:gauge"}]}]}]}}\n'
-            "^^^ Weather dashboard: replace weather.home with actual entity_id from get_weather_data().\n\n"
-            
+            '{"request_type":"dashboard_suggestion","message":"Here is your weather dashboard.","dashboard":{"title":"Weather","url_path":"weather-dashboard","icon":"mdi:weather-partly-cloudy","show_in_sidebar":true,"views":[{"title":"Current Weather","cards":[{"type":"weather-forecast","entity":"weather.home","show_current":true,"show_forecast":false},{"type":"horizontal-stack","cards":[{"type":"gauge","entity":"weather.home","attribute":"temperature","name":"Temperature","unit":"\u00b0F","min":0,"max":120,"needle":true},{"type":"gauge","entity":"weather.home","attribute":"humidity","name":"Humidity","unit":"%","min":0,"max":100,"needle":true}]},{"type":"entities","title":"Details","entities":[{"entity":"weather.home","type":"attribute","attribute":"wind_speed","name":"Wind Speed","icon":"mdi:weather-windy"},{"entity":"weather.home","type":"attribute","attribute":"pressure","name":"Pressure","icon":"mdi:gauge"}]}]}]}}\n'
+            "^^^ Weather dashboard: replace weather.home with actual entity_id from get_weather_data(). ALWAYS use dashboard_suggestion for ANY dashboard request.\n\n"
             "For data requests, use this exact JSON format:\n"
             "{\n"
             '  "request_type": "data_request",\n'
@@ -3386,7 +3384,6 @@ class AiAgentHaAgent:
                     {"role": "user", "content": user_query}
                 ]
                 history_rollback_index = len(self.conversation_history)
-
             _LOGGER.debug(
                 "Added user query to conversation history (rollback index=%d)",
                 history_rollback_index,
