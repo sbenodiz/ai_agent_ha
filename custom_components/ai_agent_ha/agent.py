@@ -2010,7 +2010,7 @@ class AiAgentHaAgent:
         self._cache: Dict[str, Any] = {}
         self.ai_client: BaseAIClient
         self._cache_timeout = 300  # 5 minutes
-        self._max_retries = 3
+        self._max_retries = 5
         self._retry_delay = 1  # seconds
         self._rate_limit = 60  # requests per minute
         self._last_request_time = 0
