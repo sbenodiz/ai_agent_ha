@@ -185,6 +185,7 @@ class AiAgentHaPanel extends LitElement {
       _dashboardPickerLoading: { type: Boolean, reflect: false, attribute: false },
       _activeSuggestionDashboard: { type: Object, reflect: false, attribute: false },
       _isStreaming: { type: Boolean, reflect: false, attribute: false },
+      _queryProgress: { type: String, reflect: false, attribute: false },
       _streamingText: { type: String, reflect: false, attribute: false },
       _dashboardChangeActive: { type: Object, reflect: false, attribute: false },
       _dashboardChangeText: { type: String, reflect: false, attribute: false }
@@ -930,6 +931,7 @@ class AiAgentHaPanel extends LitElement {
     this._promptHistoryLoaded = false;
     this._activeQueryAbort = null; // AbortController-like flag for the current WS query
     this._sessionRestored = false; // Guard: only restore session once
+    this._queryProgress = ''; // Progress feedback text for long-running queries
     this._dashboardDisplayMode = localStorage.getItem(DASHBOARD_MODE_KEY) || 'visual'; // 'visual' or 'yaml'
     this._perMessageYamlToggle = {}; // per-message overrides: msgIndex -> 'visual'|'yaml'
     this._showPredefinedPrompts = true;
@@ -983,6 +985,12 @@ class AiAgentHaPanel extends LitElement {
         // Validate each message has required fields before setting
         const valid = session.messages.filter(m => m && typeof m.type === 'string');
         if (valid.length > 0) {
+          // If the last message is from the user (orphaned by refresh during query),
+          // append a note so the user knows the query was interrupted.
+          const last = valid[valid.length - 1];
+          if (last.type === 'user') {
+            valid.push({ type: 'assistant', text: '_Previous request was interrupted by page refresh. Please resend your prompt._' });
+          }
           this._messages = valid;
           console.debug('AI Agent HA: restored', valid.length, 'messages from server session');
           this.requestUpdate();
@@ -1078,7 +1086,18 @@ class AiAgentHaPanel extends LitElement {
         (event) => this._handleStreamEnd(event),
         'ai_agent_ha/stream_end'
       );
-      console.debug("Streaming event subscriptions set up");
+
+      // Subscribe to query progress events for long-running queries
+      this._progressUnsub = this.hass.connection.subscribeEvents(
+        (event) => {
+          if (this._isLoading && event.data?.step) {
+            this._queryProgress = event.data.step;
+            this.requestUpdate();
+          }
+        },
+        'ai_agent_ha/query_progress'
+      );
+      console.debug("Event subscriptions set up");
 
       // Load prompt history from Home Assistant storage
       await this._loadPromptHistory();
@@ -1112,12 +1131,15 @@ class AiAgentHaPanel extends LitElement {
     if (this._documentClickHandler) {
       document.removeEventListener('click', this._documentClickHandler);
     }
-    // Clean up streaming subscriptions
+    // Clean up event subscriptions
     if (this._streamChunkUnsub) {
       try { this._streamChunkUnsub.then(unsub => unsub()); } catch (_) {}
     }
     if (this._streamEndUnsub) {
       try { this._streamEndUnsub.then(unsub => unsub()); } catch (_) {}
+    }
+    if (this._progressUnsub) {
+      try { this._progressUnsub.then(unsub => unsub()); } catch (_) {}
     }
     // Cancel any in-flight WS query
     if (this._activeQueryAbort) {
@@ -1521,7 +1543,7 @@ class AiAgentHaPanel extends LitElement {
                 ` : html`
                   <div class="thinking-active">
                     <span class="thinking-pulse-dot"></span>
-                    Thinking...
+                    ${this._queryProgress || 'Thinking...'}
                   </div>
                   <div class="loading-dots">
                     <div class="dot"></div>
@@ -1665,6 +1687,7 @@ class AiAgentHaPanel extends LitElement {
     promptEl.value = '';
     promptEl.style.height = 'auto';
     this._isLoading = true;
+    this._queryProgress = ''; // Reset progress text for new query
     this._error = null;
     this._debugInfo = null;
     this._thinkingExpanded = false;
@@ -1708,6 +1731,7 @@ class AiAgentHaPanel extends LitElement {
 
   _clearLoadingState() {
     this._isLoading = false;
+    this._queryProgress = '';
     this.requestUpdate();
   }
 
