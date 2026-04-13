@@ -947,10 +947,8 @@ class AiAgentHaPanel extends LitElement {
     this._pendingAutomation = null;
     this._promptHistory = [];
     this._promptHistoryLoaded = false;
-    this._lastResponseTs = 0; // Track last processed response timestamp
-    this._activeQueryId = null; // Correlation ID for the current in-flight query
-    this._queryCounter = 0;     // Monotonic counter for generating query IDs
-    this._queryStartTs = 0;     // Timestamp when the current query started (for spillover rejection)
+    this._lastResponseTs = 0; // Track last response timestamp (for post-refresh recovery)
+    this._activeQueryAbort = null; // AbortController-like flag for the current WS query
     this._dashboardDisplayMode = localStorage.getItem(DASHBOARD_MODE_KEY) || 'visual'; // 'visual' or 'yaml'
     this._perMessageYamlToggle = {}; // per-message overrides: msgIndex -> 'visual'|'yaml'
     this._showPredefinedPrompts = true;
@@ -974,7 +972,7 @@ class AiAgentHaPanel extends LitElement {
     this._showProviderDropdown = false;
     this.providersLoaded = false;
     this._eventSubscriptionSetup = false;
-    this._serviceCallTimeout = null;
+    // _serviceCallTimeout removed — WS query handles its own lifecycle
     this._showThinking = false;
     this._thinkingExpanded = false;
     this._debugInfo = null;
@@ -1084,13 +1082,8 @@ class AiAgentHaPanel extends LitElement {
     console.debug("AI Agent HA Panel connected");
     if (this.hass && !this._eventSubscriptionSetup) {
       this._eventSubscriptionSetup = true;
-      this.hass.connection.subscribeEvents(
-        (event) => this._handleLlamaResponse(event),
-        'ai_agent_ha_response'
-      );
-      console.debug("Event subscription set up in connectedCallback()");
 
-      // Subscribe to streaming events
+      // Subscribe to streaming events (Phase 2 — kept for future use)
       this._streamChunkUnsub = this.hass.connection.subscribeEvents(
         (event) => this._handleStreamChunk(event),
         'ai_agent_ha/stream_chunk'
@@ -1104,10 +1097,8 @@ class AiAgentHaPanel extends LitElement {
       // Load prompt history from Home Assistant storage
       await this._loadPromptHistory();
 
-      // Post-refresh recovery: check if a recent response is sitting in
-      // the state entity that was generated just before the page was
-      // refreshed.  Only recover if the chat is currently empty or the
-      // last message is a user prompt with no assistant reply.
+      // Post-refresh recovery: check the state entity for a response
+      // generated within the last 60 seconds (covers page refresh).
       this._tryRecoverLastResponse();
     }
 
@@ -1146,10 +1137,9 @@ class AiAgentHaPanel extends LitElement {
     if (this._streamEndUnsub) {
       try { this._streamEndUnsub.then(unsub => unsub()); } catch (_) {}
     }
-    // Clean up fallback poll
-    if (this._fallbackPollTimer) {
-      clearInterval(this._fallbackPollTimer);
-      this._fallbackPollTimer = null;
+    // Cancel any in-flight WS query
+    if (this._activeQueryAbort) {
+      this._activeQueryAbort.cancelled = true;
     }
   }
 
@@ -1159,16 +1149,6 @@ class AiAgentHaPanel extends LitElement {
     // Persist chat history whenever messages change
     if (changedProps.has('_messages')) {
       this._saveMessages();
-    }
-
-    // Set up event subscription when hass becomes available
-    if (changedProps.has('hass') && this.hass && !this._eventSubscriptionSetup) {
-      this._eventSubscriptionSetup = true;
-      this.hass.connection.subscribeEvents(
-        (event) => this._handleLlamaResponse(event),
-        'ai_agent_ha_response'
-      );
-      console.debug("Event subscription set up in updated()");
     }
 
     // Load providers when hass becomes available
@@ -1739,16 +1719,14 @@ class AiAgentHaPanel extends LitElement {
     const promptEl = this.shadowRoot.querySelector('#prompt');
     const prompt = promptEl.value.trim();
     if (!prompt) return;
-    // If a query is already in-flight, cancel it so the user can send
-    // a new prompt without waiting.  This clears the loading indicator
-    // and any in-progress poll, then proceeds with the new query.
+
+    // If a query is already in-flight, mark it as cancelled so its
+    // WS response (when it eventually arrives) is silently dropped.
     if (this._isLoading) {
-      this._clearLoadingState();
-      this._activeQueryId = null;
-      // Advance the query-start watermark so any response from the
-      // cancelled query is rejected by the spillover guard.
-      this._lastResponseTs = Date.now() / 1000;
-      // Add a visual indicator that the previous query was cancelled
+      if (this._activeQueryAbort) {
+        this._activeQueryAbort.cancelled = true;
+      }
+      this._isLoading = false;
       this._messages = [...this._messages, {
         type: 'assistant',
         text: '_Previous request cancelled._'
@@ -1769,151 +1747,63 @@ class AiAgentHaPanel extends LitElement {
     this._isLoading = true;
     this._error = null;
     this._debugInfo = null;
-    this._thinkingExpanded = false; // keep collapsed until a trace arrives
+    this._thinkingExpanded = false;
+    this.requestUpdate();
+    this._scrollToBottom();
 
-    // Clear any existing timeout
-    if (this._serviceCallTimeout) {
-      clearTimeout(this._serviceCallTimeout);
-    }
-
-    // Set timeout to clear loading state after 300 seconds
-    // Increased from 60s to support local models (LM Studio, Ollama) which
-    // may take longer to generate responses on local hardware.
-    this._serviceCallTimeout = setTimeout(() => {
-      if (this._isLoading) {
-        console.warn("Service call timeout - clearing loading state");
-        this._isLoading = false;
-        this._error = 'Request timed out. Please try again.';
-        this._messages = [...this._messages, {
-          type: 'assistant',
-          text: 'Sorry, the request timed out. Please try again.'
-        }];
-        this.requestUpdate();
-      }
-    }, 300000); // 300 second timeout (matches backend aiohttp timeout)
-
-    // Record the timestamp *before* firing the service so the fallback
-    // can distinguish stale vs fresh responses in the state entity.
-    // Also store as instance property so _handleLlamaResponse can reject
-    // stale responses from a previous cancelled query.
-    const queryStartTs = this._lastResponseTs;
-    this._queryStartTs = queryStartTs;
-
-    // Generate a unique query ID to correlate responses with requests.
-    // This prevents stale responses from a previous slow query being
-    // rendered as if they belong to the current query.
-    this._queryCounter += 1;
-    const queryId = `q_${this._queryCounter}_${Date.now()}`;
-    this._activeQueryId = queryId;
-    console.debug(`Query ${queryId} starting`);
-
-    // Start fallback poll *before* awaiting the service call.
-    // callService is awaited and may block for 10-30s on slow LLM
-    // round-trips — if the event fires while we're still awaiting,
-    // the event handler picks it up and cancels the poll.  If not,
-    // the poll recovers the response from the state entity.
-    this._startFallbackPoll(queryStartTs, queryId);
+    // Create a cancellation token for this query.  If the user sends
+    // a new prompt before this one resolves, the token is marked
+    // cancelled and the WS response is silently dropped.
+    const queryToken = { cancelled: false };
+    this._activeQueryAbort = queryToken;
 
     try {
-      console.debug("Calling ai_agent_ha service");
-      await this.hass.callService('ai_agent_ha', 'query', {
+      console.debug("Calling ai_agent_ha/query via WebSocket");
+      const result = await this.hass.callWS({
+        type: 'ai_agent_ha/query',
         prompt: prompt,
         provider: this._selectedProvider,
-        debug: this._showThinking
+        debug: this._showThinking,
       });
 
-      // Service call resolved — if we're still loading, the event
-      // may have fired while JS was blocked on the await.  Do an
-      // immediate one-shot check of the state entity.
-      if (this._isLoading && this._activeQueryId === queryId) {
-        try {
-          const snap = await this.hass.callWS({ type: 'ai_agent_ha/get_last_response' });
-          if (snap && (snap._ts || 0) > queryStartTs && (snap._ts || 0) > this._lastResponseTs) {
-            console.debug(`Post-await recovery (${queryId}): found response in state entity`);
-            this._handleLlamaResponse({ data: snap });
-          }
-        } catch (_) { /* poll will catch it */ }
+      // If user sent a new prompt while we were awaiting, drop this result.
+      if (queryToken.cancelled) {
+        console.debug('WS response arrived but query was cancelled — dropping');
+        return;
       }
+
+      this._processQueryResult(result);
     } catch (error) {
-      console.error("Error calling service:", error);
-      this._clearLoadingState();
+      if (queryToken.cancelled) return;
+      console.error("WS query error:", error);
+      this._isLoading = false;
       this._error = error.message || 'An error occurred while processing your request';
       this._messages = [...this._messages, {
         type: 'assistant',
         text: `Error: ${this._error}`
       }];
+      this.requestUpdate();
     }
   }
 
   _clearLoadingState() {
     this._isLoading = false;
-    if (this._serviceCallTimeout) {
-      clearTimeout(this._serviceCallTimeout);
-      this._serviceCallTimeout = null;
-    }
-    if (this._fallbackPollTimer) {
-      clearInterval(this._fallbackPollTimer);
-      this._fallbackPollTimer = null;
-    }
-  }
-
-  _startFallbackPoll(queryStartTs, queryId) {
-    // Don't start a second poller if one is already running
-    if (this._fallbackPollTimer) return;
-
-    let elapsed = 0;
-    const POLL_INTERVAL = 3000;   // 3 seconds
-    const POLL_MAX     = 300000;  // 5 minutes (matches main timeout)
-
-    this._fallbackPollTimer = setInterval(async () => {
-      elapsed += POLL_INTERVAL;
-
-      // Stop polling if we're no longer loading (event arrived), if the
-      // active query has changed (user sent a new prompt), or if timed out.
-      if (!this._isLoading || this._activeQueryId !== queryId || elapsed > POLL_MAX) {
-        clearInterval(this._fallbackPollTimer);
-        this._fallbackPollTimer = null;
-        return;
-      }
-
-      try {
-        const result = await this.hass.callWS({ type: 'ai_agent_ha/get_last_response' });
-        if (!result) return;
-
-        const responseTs = result._ts || 0;
-        // Only process if this is a *newer* response than when we started
-        if (responseTs > queryStartTs && responseTs > this._lastResponseTs) {
-          console.debug(`Fallback poll (${queryId}): recovered response from state entity`, responseTs);
-          clearInterval(this._fallbackPollTimer);
-          this._fallbackPollTimer = null;
-          // Feed into the existing handler as a synthetic event
-          this._handleLlamaResponse({ data: result });
-        }
-      } catch (e) {
-        console.debug('Fallback poll error:', e);
-      }
-    }, POLL_INTERVAL);
+    this.requestUpdate();
   }
 
   async _tryRecoverLastResponse() {
     // On page load / refresh, check the state entity for a response
-    // that was generated within the last 60 seconds.  This covers the
-    // case where the user refreshed while a response was in-flight or
-    // had just arrived.
+    // generated within the last 60 seconds.  Restores the result if
+    // the last chat message is from the user (reply was lost).
     try {
       const snap = await this.hass.callWS({ type: 'ai_agent_ha/get_last_response' });
       if (!snap || !snap._ts) return;
       const ageSec = (Date.now() / 1000) - snap._ts;
-      if (ageSec > 60) return; // too old to recover
-      // Only recover if the last chat message is from the user (i.e.
-      // the assistant reply was lost) or the chat is empty.
+      if (ageSec > 60) return;
       const lastMsg = this._messages[this._messages.length - 1];
       if (this._messages.length > 0 && (!lastMsg || lastMsg.type !== 'user')) return;
-      console.debug('Post-refresh recovery: restoring response from state entity, age', ageSec.toFixed(1), 's');
-      // Feed into the normal handler — but first set _isLoading so
-      // the handler doesn't reject it as "not currently loading".
-      this._isLoading = true;
-      this._handleLlamaResponse({ data: snap });
+      console.debug('Post-refresh recovery: restoring response, age', ageSec.toFixed(1), 's');
+      this._processQueryResult(snap);
     } catch (e) {
       console.debug('Post-refresh recovery failed:', e);
     }
@@ -1929,101 +1819,74 @@ class AiAgentHaPanel extends LitElement {
   }
 
   _handleStreamEnd(event) {
-    // Stream ended — the final response will arrive via ai_agent_ha_response
     this._isStreaming = false;
     console.debug("Stream ended");
     this.requestUpdate();
   }
 
-  _handleLlamaResponse(event) {
-    console.debug("Received llama response:", event);
-
-    // Guard: ignore late-arriving responses if we are not currently
-    // waiting for one.  This prevents stale results from a previous
-    // slow query being rendered after the user has already moved on.
-    if (!this._isLoading) {
-      console.debug('Ignoring response — not currently loading (stale or duplicate)');
-      return;
-    }
-
-    // Guard: reject responses whose timestamp predates the current query.
-    // This catches spillover from a cancelled query whose response arrives
-    // after a new query has already started (both are _isLoading=true).
-    const responseTs = event.data?._ts || 0;
-    if (responseTs && this._queryStartTs && responseTs <= this._queryStartTs) {
-      console.debug('Ignoring response — timestamp predates current query (spillover from cancelled query)', responseTs, '<=', this._queryStartTs);
-      return;
-    }
-    
-    // Cancel fallback poll since event arrived
-    if (this._fallbackPollTimer) {
-      clearInterval(this._fallbackPollTimer);
-      this._fallbackPollTimer = null;
-    }
-    // Track timestamp to prevent duplicate processing from fallback
-    if (event.data?._ts) {
-      this._lastResponseTs = event.data._ts;
-    } else {
-      this._lastResponseTs = Date.now() / 1000;
-    }
-    // Clear active query ID so no further duplicates are processed
-    this._activeQueryId = null;
+  /**
+   * Process a query result dict (from WS response or post-refresh recovery).
+   * This is the single code path for rendering AI responses.
+   */
+  _processQueryResult(data) {
+    console.debug("Processing query result:", data);
 
     try {
-      this._clearLoadingState();
+      this._isLoading = false;
       this._isStreaming = false;
       this._streamingText = '';
-      this._debugInfo = this._showThinking ? (event.data.debug || null) : null;
+      this._debugInfo = this._showThinking ? (data.debug || null) : null;
       if (this._showThinking && this._debugInfo) {
         this._thinkingExpanded = true;
       }
+      // Track timestamp for post-refresh recovery
+      if (data._ts) {
+        this._lastResponseTs = data._ts;
+      } else {
+        this._lastResponseTs = Date.now() / 1000;
+      }
 
-      if (event.data.success) {
+      if (data.success) {
         // ── Typed-envelope handler ──────────────────────────────
-        // Agent.py now classifies every response into a typed
-        // envelope: { type, message, dashboard?, automation? }.
-        // We switch on `type` instead of parsing raw JSON.
-        const envType = event.data.type || 'text';
-        const envMessage = event.data.message || event.data.answer || '';
+        const envType = data.type || 'text';
+        const envMessage = data.message || data.answer || '';
 
-        // Check for empty response
-        if (!envMessage && !event.data.dashboard && !event.data.automation) {
+        if (!envMessage && !data.dashboard && !data.automation) {
           console.warn("AI agent returned empty response");
           this._messages = [
             ...this._messages,
             { type: 'assistant', text: 'I received your message but I\'m not sure how to respond. Could you please try rephrasing your question?' }
           ];
+          this.requestUpdate();
           return;
         }
 
         let message = { type: 'assistant', text: envMessage };
 
-        // Capture thinking content
-        if (event.data.thinking) {
-          message.thinking = event.data.thinking;
-          message.thinking_duration = event.data.thinking_duration || null;
+        if (data.thinking) {
+          message.thinking = data.thinking;
+          message.thinking_duration = data.thinking_duration || null;
         }
 
         switch (envType) {
           case 'dashboard':
-            console.debug('Envelope: dashboard', event.data.dashboard);
-            message.dashboard = event.data.dashboard;
+            console.debug('Envelope: dashboard', data.dashboard);
+            message.dashboard = data.dashboard;
             message.text = envMessage || 'I created a dashboard configuration for you. Would you like me to deploy it?';
             break;
 
           case 'automation':
-            console.debug('Envelope: automation', event.data.automation);
-            message.automation = event.data.automation;
+            console.debug('Envelope: automation', data.automation);
+            message.automation = data.automation;
             message.text = envMessage || 'I found an automation that might help. Would you like me to create it?';
             break;
 
           case 'text':
           default:
             console.debug('Envelope: text');
-            // Backward compat: if no typed envelope, try legacy extractAllJson
-            if (!event.data.type && event.data.answer) {
+            if (!data.type && data.answer) {
               try {
-                const { actionable: parsed, all: allObjects } = extractAllJson(event.data.answer);
+                const { actionable: parsed, all: allObjects } = extractAllJson(data.answer);
                 const tempReadings = extractTemperatureChart(allObjects);
                 if (tempReadings) {
                   message.chartData = { type: 'temperature', readings: tempReadings };
@@ -2050,15 +1913,18 @@ class AiAgentHaPanel extends LitElement {
         this._messages = [...this._messages, message];
         this._saveHistoryToStorage();
       } else {
-        this._error = event.data.error || 'An error occurred';
+        this._error = data.error || 'An error occurred';
         this._messages = [
           ...this._messages,
           { type: 'assistant', text: `Error: ${this._error}` }
         ];
       }
+
+      this.requestUpdate();
+      this._scrollToBottom();
     } catch (error) {
-      console.error("Error in _handleLlamaResponse:", error);
-      this._clearLoadingState();
+      console.error("Error in _processQueryResult:", error);
+      this._isLoading = false;
       this._error = 'An error occurred while processing the response';
       this._messages = [...this._messages, {
         type: 'assistant',
@@ -2198,27 +2064,14 @@ class AiAgentHaPanel extends LitElement {
     this._thinkingExpanded = false;
     this.requestUpdate();
 
-    // Timeout fallback — consistent with _approveDashboard pattern
-    if (this._serviceCallTimeout) clearTimeout(this._serviceCallTimeout);
-    this._serviceCallTimeout = setTimeout(() => {
-      if (this._isLoading) {
-        this._clearLoadingState();
-        this._error = 'Request timed out. Please try again.';
-        this.requestUpdate();
-      }
-    }, 300000);
-
-    const queryStartTs = this._lastResponseTs;
-    this._queryCounter += 1;
-    const queryId = `qd_${this._queryCounter}_${Date.now()}`;
-    this._activeQueryId = queryId;
-    this._startFallbackPoll(queryStartTs, queryId);
     try {
-      await this.hass.callService('ai_agent_ha', 'query', {
+      const result = await this.hass.callWS({
+        type: 'ai_agent_ha/query',
         prompt: `Please update the "${safeTitle}" dashboard with the following changes: ${changeText}. Return a complete updated dashboard_suggestion JSON.`,
         provider: this._selectedProvider,
-        debug: this._showThinking
+        debug: this._showThinking,
       });
+      this._processQueryResult(result);
     } catch (e) {
       console.error('Error requesting dashboard change:', e);
       this._clearLoadingState();
