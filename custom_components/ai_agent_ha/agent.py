@@ -2010,7 +2010,7 @@ class AiAgentHaAgent:
         self._cache: Dict[str, Any] = {}
         self.ai_client: BaseAIClient
         self._cache_timeout = 300  # 5 minutes
-        self._max_retries = 10
+        self._max_retries = 3
         self._retry_delay = 1  # seconds
         self._rate_limit = 60  # requests per minute
         self._last_request_time = 0
@@ -2905,12 +2905,13 @@ class AiAgentHaAgent:
 
             # Read current automations.yaml using async executor
             automations_path = self.hass.config.path("automations.yaml")
-            try:
-                current_automations = await self.hass.async_add_executor_job(
-                    lambda: yaml.safe_load(open(automations_path, "r")) or []
-                )
-            except FileNotFoundError:
-                current_automations = []
+            def _read_automations():
+                try:
+                    with open(automations_path, "r") as fh:
+                        return yaml.safe_load(fh) or []
+                except FileNotFoundError:
+                    return []
+            current_automations = await self.hass.async_add_executor_job(_read_automations)
 
             # Check for duplicate automation names
             if any(
@@ -2925,13 +2926,10 @@ class AiAgentHaAgent:
             current_automations.append(automation_entry)
 
             # Write back to file using async executor
-            await self.hass.async_add_executor_job(
-                lambda: yaml.dump(
-                    current_automations,
-                    open(automations_path, "w"),
-                    default_flow_style=False,
-                )
-            )
+            def _write_automations():
+                with open(automations_path, "w") as fh:
+                    yaml.dump(current_automations, fh, default_flow_style=False)
+            await self.hass.async_add_executor_job(_write_automations)
 
             # Reload automations
             await self.hass.services.async_call("automation", "reload")
@@ -4543,9 +4541,9 @@ class AiAgentHaAgent:
                         )
                     else:
                         retry_count += 1
-                        # Exponential backoff: 1 s, 2 s, 4 s … capped at 30 s
+                        # Exponential backoff: 1 s, 2 s, 4 s — capped at 4 s
                         await asyncio.sleep(
-                            min(self._retry_delay * (2 ** (retry_count - 1)), 30)
+                            min(self._retry_delay * (2 ** (retry_count - 1)), 4)
                         )
                         continue
 
@@ -4557,9 +4555,9 @@ class AiAgentHaAgent:
                 last_error = e
                 retry_count += 1
                 if retry_count < self._max_retries:
-                    # Exponential backoff: 1 s, 2 s, 4 s … capped at 30 s
+                    # Exponential backoff: 1 s, 2 s, 4 s — capped at 4 s
                     await asyncio.sleep(
-                        min(self._retry_delay * (2 ** (retry_count - 1)), 30)
+                        min(self._retry_delay * (2 ** (retry_count - 1)), 4)
                     )
                 continue
         raise Exception(
