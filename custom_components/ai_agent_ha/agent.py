@@ -3535,6 +3535,14 @@ class AiAgentHaAgent:
                 iteration += 1
                 _LOGGER.debug(f"Processing iteration {iteration} of {max_iterations}")
 
+                # Fire progress callback so the panel can show feedback
+                if hasattr(self, '_progress_cb') and self._progress_cb:
+                    step = "Analyzing request..." if iteration == 1 else f"Gathering data (step {iteration}/{max_iterations})..."
+                    try:
+                        self._progress_cb(step, iteration)
+                    except Exception:
+                        pass  # Never let progress reporting break the query
+
                 try:
                     # Get AI response (with optional streaming)
                     _LOGGER.debug("Requesting response from AI provider")
@@ -3778,6 +3786,26 @@ class AiAgentHaAgent:
                                 json.dumps(parameters),
                             )
 
+                            # Fire detailed progress for the data fetch
+                            if hasattr(self, '_progress_cb') and self._progress_cb:
+                                _friendly_steps = {
+                                    "get_weather_data": "Fetching weather data...",
+                                    "get_entity_state": "Reading entity state...",
+                                    "get_entity_registry": "Scanning entity registry...",
+                                    "get_entities_by_domain": "Discovering entities...",
+                                    "get_entities_by_device_class": "Discovering sensors...",
+                                    "get_entities": "Discovering entities...",
+                                    "get_area_registry": "Loading areas...",
+                                    "get_history": "Fetching history data...",
+                                    "get_statistics": "Fetching statistics...",
+                                    "get_dashboards": "Loading existing dashboards...",
+                                }
+                                _step_msg = _friendly_steps.get(request_type, f"Processing {request_type}...")
+                                try:
+                                    self._progress_cb(_step_msg, iteration)
+                                except Exception:
+                                    pass
+
                             # Add AI's response to conversation history
                             self.conversation_history.append(
                                 {
@@ -3934,6 +3962,16 @@ class AiAgentHaAgent:
                             "dashboard_suggestion",
                             "automation_suggestion",
                         ):
+                            # Fire progress: building response
+                            if hasattr(self, '_progress_cb') and self._progress_cb:
+                                _rt = response_data.get('request_type', '')
+                                _step = "Building dashboard..." if 'dashboard' in _rt else (
+                                    "Building automation..." if 'automation' in _rt else "Generating response..."
+                                )
+                                try:
+                                    self._progress_cb(_step, iteration)
+                                except Exception:
+                                    pass
                             # ── Typed-envelope classification ──────────────
                             # _classify_response converts any of the above
                             # request_types (including final_response that
