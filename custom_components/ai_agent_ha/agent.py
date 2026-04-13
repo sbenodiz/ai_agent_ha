@@ -2023,6 +2023,10 @@ class AiAgentHaAgent:
         # _get_ai_response only sends the last 10 to the model, but we
         # keep a larger buffer for rollback and debug trace purposes.
         self._max_history_len = 50
+        # Conversation TTL: auto-expire stale history to prevent
+        # context drift across long idle periods.
+        self._conversation_ttl = 1800  # 30 minutes
+        self._conversation_last_active = 0.0
 
         provider = config.get("ai_provider", "openai")
         models_config = config.get("models", {})
@@ -3284,6 +3288,22 @@ class AiAgentHaAgent:
         try:
             if not user_query or not isinstance(user_query, str):
                 return {"success": False, "error": "Invalid query format"}
+
+            # Enforce conversation TTL — if idle longer than the threshold,
+            # auto-clear to prevent stale context from affecting new queries.
+            now = time.time()
+            if (
+                self._conversation_last_active > 0
+                and (now - self._conversation_last_active) > self._conversation_ttl
+                and self.conversation_history
+            ):
+                _LOGGER.debug(
+                    "Conversation TTL expired (idle %.0fs) — clearing history",
+                    now - self._conversation_last_active,
+                )
+                self.conversation_history = []
+                self._cache.clear()
+            self._conversation_last_active = now
 
             # Get the correct configuration for the requested provider
             if provider and provider in self.hass.data[DOMAIN]["configs"]:
@@ -4643,6 +4663,7 @@ class AiAgentHaAgent:
         """Clear the conversation history and cache."""
         self.conversation_history = []
         self._cache.clear()
+        self._conversation_last_active = 0.0
         _LOGGER.debug("Conversation history and cache cleared")
 
     async def set_entity_state(
