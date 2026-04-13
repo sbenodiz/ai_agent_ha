@@ -1102,6 +1102,12 @@ class AiAgentHaPanel extends LitElement {
 
       // Load prompt history from Home Assistant storage
       await this._loadPromptHistory();
+
+      // Post-refresh recovery: check if a recent response is sitting in
+      // the state entity that was generated just before the page was
+      // refreshed.  Only recover if the chat is currently empty or the
+      // last message is a user prompt with no assistant reply.
+      this._tryRecoverLastResponse();
     }
 
     // Clear all ai_agent_ha storage on HA logout
@@ -1115,17 +1121,22 @@ class AiAgentHaPanel extends LitElement {
     window.addEventListener('hass-logout', this._logoutHandler);
 
     // Close dropdown when clicking outside
-    document.addEventListener('click', (e) => {
+    this._documentClickHandler = (e) => {
       if (!this.shadowRoot.querySelector('.provider-selector')?.contains(e.target)) {
         this._showProviderDropdown = false;
       }
-    });
+    };
+    document.addEventListener('click', this._documentClickHandler);
   }
 
   disconnectedCallback() {
     super.disconnectedCallback();
     if (this._logoutHandler) {
       window.removeEventListener('hass-logout', this._logoutHandler);
+    }
+    // Clean up document click listener (CR-3: prevent memory leak)
+    if (this._documentClickHandler) {
+      document.removeEventListener('click', this._documentClickHandler);
     }
     // Clean up streaming subscriptions
     if (this._streamChunkUnsub) {
@@ -1302,7 +1313,6 @@ class AiAgentHaPanel extends LitElement {
   }
 
   _usePrompt(prompt) {
-    if (this._isLoading) return;
     const promptEl = this.shadowRoot.querySelector('#prompt');
     if (promptEl) {
       promptEl.value = prompt;
@@ -1449,7 +1459,6 @@ class AiAgentHaPanel extends LitElement {
         <button
           class="clear-button"
           @click=${this._clearChat}
-          ?disabled=${this._isLoading}
         >
           <ha-icon icon="mdi:delete-sweep"></ha-icon>
           <span>Clear Chat</span>
@@ -1632,7 +1641,6 @@ class AiAgentHaPanel extends LitElement {
                 <textarea
                   id="prompt"
                   placeholder="Ask me anything about your Home Assistant..."
-                  ?disabled=${this._isLoading}
                   @keydown=${this._handleKeyDown}
                   @input=${this._autoResize}
                 ></textarea>
@@ -1677,7 +1685,7 @@ class AiAgentHaPanel extends LitElement {
               <ha-button
                 class="send-button"
                 @click=${this._sendMessage}
-                .disabled=${this._isLoading || !this._hasProviders()}
+                .disabled=${!this._hasProviders()}
               >
                 <ha-icon icon="mdi:send"></ha-icon>
               </ha-button>
@@ -1702,7 +1710,7 @@ class AiAgentHaPanel extends LitElement {
   }
 
   _handleKeyDown(e) {
-    if (e.key === 'Enter' && !e.shiftKey && !this._isLoading) {
+    if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
       this._sendMessage();
     }
@@ -1729,7 +1737,14 @@ class AiAgentHaPanel extends LitElement {
   async _sendMessage() {
     const promptEl = this.shadowRoot.querySelector('#prompt');
     const prompt = promptEl.value.trim();
-    if (!prompt || this._isLoading) return;
+    if (!prompt) return;
+    // If a query is already in-flight, cancel it so the user can send
+    // a new prompt without waiting.  This clears the loading indicator
+    // and any in-progress poll, then proceeds with the new query.
+    if (this._isLoading) {
+      this._clearLoadingState();
+      this._activeQueryId = null;
+    }
 
     console.debug("Sending message:", prompt);
     console.debug("Sending message with provider:", this._selectedProvider);
@@ -1865,6 +1880,30 @@ class AiAgentHaPanel extends LitElement {
         console.debug('Fallback poll error:', e);
       }
     }, POLL_INTERVAL);
+  }
+
+  async _tryRecoverLastResponse() {
+    // On page load / refresh, check the state entity for a response
+    // that was generated within the last 60 seconds.  This covers the
+    // case where the user refreshed while a response was in-flight or
+    // had just arrived.
+    try {
+      const snap = await this.hass.callWS({ type: 'ai_agent_ha/get_last_response' });
+      if (!snap || !snap._ts) return;
+      const ageSec = (Date.now() / 1000) - snap._ts;
+      if (ageSec > 60) return; // too old to recover
+      // Only recover if the last chat message is from the user (i.e.
+      // the assistant reply was lost) or the chat is empty.
+      const lastMsg = this._messages[this._messages.length - 1];
+      if (this._messages.length > 0 && (!lastMsg || lastMsg.type !== 'user')) return;
+      console.debug('Post-refresh recovery: restoring response from state entity, age', ageSec.toFixed(1), 's');
+      // Feed into the normal handler — but first set _isLoading so
+      // the handler doesn't reject it as "not currently loading".
+      this._isLoading = true;
+      this._handleLlamaResponse({ data: snap });
+    } catch (e) {
+      console.debug('Post-refresh recovery failed:', e);
+    }
   }
 
   _handleStreamChunk(event) {
@@ -2309,7 +2348,9 @@ class AiAgentHaPanel extends LitElement {
            changedProps.has('_isStreaming') ||
            changedProps.has('_streamingText') ||
            changedProps.has('_dashboardChangeActive') ||
-           changedProps.has('_dashboardChangeText');
+           changedProps.has('_dashboardChangeText') ||
+           changedProps.has('_showThinking') ||
+           changedProps.has('_debugInfo');
   }
 
   _clearChat() {
