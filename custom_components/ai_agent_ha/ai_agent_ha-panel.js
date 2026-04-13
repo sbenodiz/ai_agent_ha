@@ -1745,11 +1745,15 @@ class AiAgentHaPanel extends LitElement {
     if (this._isLoading) {
       this._clearLoadingState();
       this._activeQueryId = null;
+      // Advance the query-start watermark so any response from the
+      // cancelled query is rejected by the spillover guard.
+      this._lastResponseTs = Date.now() / 1000;
       // Add a visual indicator that the previous query was cancelled
       this._messages = [...this._messages, {
         type: 'assistant',
         text: '_Previous request cancelled._'
       }];
+      this.requestUpdate();
     }
 
     console.debug("Sending message:", prompt);
@@ -2368,7 +2372,8 @@ class AiAgentHaPanel extends LitElement {
            changedProps.has('_dashboardChangeActive') ||
            changedProps.has('_dashboardChangeText') ||
            changedProps.has('_showThinking') ||
-           changedProps.has('_debugInfo');
+           changedProps.has('_debugInfo') ||
+           changedProps.has('_thinkingExpanded');
   }
 
   _clearChat() {
