@@ -929,6 +929,7 @@ class AiAgentHaPanel extends LitElement {
     this._promptHistory = [];
     this._promptHistoryLoaded = false;
     this._activeQueryAbort = null; // AbortController-like flag for the current WS query
+    this._sessionRestored = false; // Guard: only restore session once
     this._dashboardDisplayMode = localStorage.getItem(DASHBOARD_MODE_KEY) || 'visual'; // 'visual' or 'yaml'
     this._perMessageYamlToggle = {}; // per-message overrides: msgIndex -> 'visual'|'yaml'
     this._showPredefinedPrompts = true;
@@ -971,17 +972,88 @@ class AiAgentHaPanel extends LitElement {
 
   async _restoreSession() {
     // Restore full chat session (including dashboard/automation objects)
-    // from the server-side session store.
+    // from the server-side session store.  Fully defensive — must never
+    // interfere with provider loading or the render cycle.
+    if (this._sessionRestored) return;
+    if (!this.hass) return;
+    this._sessionRestored = true;
     try {
       const session = await this.hass.callWS({ type: 'ai_agent_ha/get_session' });
-      if (session && session.messages && session.messages.length > 0) {
-        this._messages = session.messages;
-        console.debug('AI Agent HA: restored', this._messages.length, 'messages from server session');
-        this.requestUpdate();
-        this._scrollToBottom();
+      if (session && Array.isArray(session.messages) && session.messages.length > 0) {
+        // Validate each message has required fields before setting
+        const valid = session.messages.filter(m => m && typeof m.type === 'string');
+        if (valid.length > 0) {
+          this._messages = valid;
+          console.debug('AI Agent HA: restored', valid.length, 'messages from server session');
+          this.requestUpdate();
+          await this.updateComplete;
+          this._scrollToBottom();
+        }
       }
     } catch (e) {
-      console.debug('AI Agent HA: session restore failed:', e);
+      console.debug('AI Agent HA: session restore skipped:', e?.message || e);
+    }
+  }
+
+  async _loadProviders(attempt = 1) {
+    const MAX_ATTEMPTS = 3;
+    const RETRY_DELAY_MS = 2000;
+    try {
+      // Primary: use ai_agent_ha/get_providers — authoritative, no credential exposure
+      let providers = [];
+
+      try {
+        const providerData = await this.hass.callWS({ type: 'ai_agent_ha/get_providers' });
+        if (providerData && providerData.length > 0) {
+          providers = providerData.map(p => ({
+            value: p.value,
+            label: p.label,
+            model: p.model || ''
+          }));
+          console.debug("AI Agent HA: providers loaded via get_providers WS:", providers);
+        }
+      } catch (wsErr) {
+        console.warn("AI Agent HA: get_providers WS failed, falling back to config_entries/get:", wsErr);
+        // Fallback: parse config_entries/get (title + unique_id only — entry.data not exposed by HA)
+        const allEntries = await this.hass.callWS({ type: 'config_entries/get' });
+        const aiAgentEntries = allEntries.filter(entry => entry.domain === 'ai_agent_ha');
+        providers = aiAgentEntries
+          .map(entry => {
+            const provider = this._resolveProviderFromEntry(entry);
+            if (!provider) return null;
+            return { value: provider, label: PROVIDERS[provider] || provider, model: '' };
+          })
+          .filter(Boolean);
+        console.debug("AI Agent HA: providers loaded via config_entries fallback:", providers);
+      }
+
+      if (providers.length > 0) {
+        this._availableProviders = providers;
+        console.debug("Available AI providers:", this._availableProviders);
+        if (
+          (!this._selectedProvider || !providers.find(p => p.value === this._selectedProvider)) &&
+          providers.length > 0
+        ) {
+          this._selectedProvider = providers[0].value;
+        }
+      } else if (attempt < MAX_ATTEMPTS) {
+        // Integration may still be loading after HA restart — retry
+        console.debug(`AI Agent HA: no providers found (attempt ${attempt}/${MAX_ATTEMPTS}), retrying in ${RETRY_DELAY_MS}ms...`);
+        await new Promise(r => setTimeout(r, RETRY_DELAY_MS));
+        return this._loadProviders(attempt + 1);
+      } else {
+        console.debug("No 'ai_agent_ha' providers found after", MAX_ATTEMPTS, "attempts.");
+        this._availableProviders = [];
+      }
+    } catch (error) {
+      if (attempt < MAX_ATTEMPTS) {
+        console.debug(`AI Agent HA: provider load error (attempt ${attempt}/${MAX_ATTEMPTS}), retrying...`, error);
+        await new Promise(r => setTimeout(r, RETRY_DELAY_MS));
+        return this._loadProviders(attempt + 1);
+      }
+      console.error("Error fetching AI providers:", error);
+      this._error = error.message || 'Failed to load AI provider configurations.';
+      this._availableProviders = [];
     }
   }
 
@@ -1010,9 +1082,6 @@ class AiAgentHaPanel extends LitElement {
 
       // Load prompt history from Home Assistant storage
       await this._loadPromptHistory();
-
-      // Restore chat session from server-side store
-      this._restoreSession();
     }
 
     // Clear ai_agent_ha localStorage on HA logout (prompt history etc.)
@@ -1062,56 +1131,11 @@ class AiAgentHaPanel extends LitElement {
     // Load providers when hass becomes available
     if (changedProps.has('hass') && this.hass && !this.providersLoaded) {
       this.providersLoaded = true;
+      await this._loadProviders();
 
-      try {
-        // Primary: use ai_agent_ha/get_providers — authoritative, no credential exposure
-        let providers = [];
+      // Restore chat session from server-side store (guard is inside _restoreSession)
+      this._restoreSession();
 
-        try {
-          const providerData = await this.hass.callWS({ type: 'ai_agent_ha/get_providers' });
-          if (providerData && providerData.length > 0) {
-            providers = providerData.map(p => ({
-              value: p.value,
-              label: p.label,
-              model: p.model || ''
-            }));
-            console.debug("AI Agent HA: providers loaded via get_providers WS:", providers);
-          }
-        } catch (wsErr) {
-          console.warn("AI Agent HA: get_providers WS failed, falling back to config_entries/get:", wsErr);
-          // Fallback: parse config_entries/get (title + unique_id only — entry.data not exposed by HA)
-          const allEntries = await this.hass.callWS({ type: 'config_entries/get' });
-          const aiAgentEntries = allEntries.filter(entry => entry.domain === 'ai_agent_ha');
-          providers = aiAgentEntries
-            .map(entry => {
-              const provider = this._resolveProviderFromEntry(entry);
-              if (!provider) return null;
-              return { value: provider, label: PROVIDERS[provider] || provider, model: '' };
-            })
-            .filter(Boolean);
-          console.debug("AI Agent HA: providers loaded via config_entries fallback:", providers);
-        }
-
-        if (providers.length > 0) {
-          this._availableProviders = providers;
-
-          console.debug("Available AI providers:", this._availableProviders);
-
-          if (
-            (!this._selectedProvider || !providers.find(p => p.value === this._selectedProvider)) &&
-            providers.length > 0
-          ) {
-            this._selectedProvider = providers[0].value;
-          }
-        } else {
-          console.debug("No 'ai_agent_ha' providers found.");
-          this._availableProviders = [];
-        }
-      } catch (error) {
-        console.error("Error fetching AI providers:", error);
-        this._error = error.message || 'Failed to load AI provider configurations.';
-        this._availableProviders = [];
-      }
       this.requestUpdate();
     }
 
