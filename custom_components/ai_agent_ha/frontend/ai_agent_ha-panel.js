@@ -950,6 +950,7 @@ class AiAgentHaPanel extends LitElement {
     this._lastResponseTs = 0; // Track last processed response timestamp
     this._activeQueryId = null; // Correlation ID for the current in-flight query
     this._queryCounter = 0;     // Monotonic counter for generating query IDs
+    this._queryStartTs = 0;     // Timestamp when the current query started (for spillover rejection)
     this._dashboardDisplayMode = localStorage.getItem(DASHBOARD_MODE_KEY) || 'visual'; // 'visual' or 'yaml'
     this._perMessageYamlToggle = {}; // per-message overrides: msgIndex -> 'visual'|'yaml'
     this._showPredefinedPrompts = true;
@@ -1789,7 +1790,10 @@ class AiAgentHaPanel extends LitElement {
 
     // Record the timestamp *before* firing the service so the fallback
     // can distinguish stale vs fresh responses in the state entity.
+    // Also store as instance property so _handleLlamaResponse can reject
+    // stale responses from a previous cancelled query.
     const queryStartTs = this._lastResponseTs;
+    this._queryStartTs = queryStartTs;
 
     // Generate a unique query ID to correlate responses with requests.
     // This prevents stale responses from a previous slow query being
@@ -1935,6 +1939,15 @@ class AiAgentHaPanel extends LitElement {
     // slow query being rendered after the user has already moved on.
     if (!this._isLoading) {
       console.debug('Ignoring response — not currently loading (stale or duplicate)');
+      return;
+    }
+
+    // Guard: reject responses whose timestamp predates the current query.
+    // This catches spillover from a cancelled query whose response arrives
+    // after a new query has already started (both are _isLoading=true).
+    const responseTs = event.data?._ts || 0;
+    if (responseTs && this._queryStartTs && responseTs <= this._queryStartTs) {
+      console.debug('Ignoring response — timestamp predates current query (spillover from cancelled query)', responseTs, '<=', this._queryStartTs);
       return;
     }
     
