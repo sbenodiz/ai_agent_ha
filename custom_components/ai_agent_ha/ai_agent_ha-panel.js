@@ -1744,6 +1744,11 @@ class AiAgentHaPanel extends LitElement {
     if (this._isLoading) {
       this._clearLoadingState();
       this._activeQueryId = null;
+      // Add a visual indicator that the previous query was cancelled
+      this._messages = [...this._messages, {
+        type: 'assistant',
+        text: '_Previous request cancelled._'
+      }];
     }
 
     console.debug("Sending message:", prompt);
