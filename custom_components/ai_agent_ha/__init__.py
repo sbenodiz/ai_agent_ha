@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import pathlib
 import time
 
 import voluptuous as vol
@@ -202,7 +203,19 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             raise ConfigEntryNotReady("Config entry missing required 'ai_provider' key")
 
         if DOMAIN not in hass.data:
-            hass.data[DOMAIN] = {"agents": {}, "configs": {}}
+            # Read version from manifest for cache-busting the panel JS URL
+            _manifest_ver = "0"
+            try:
+                import importlib.metadata
+                _manifest_ver = importlib.metadata.version("ai_agent_ha") or "0"
+            except Exception:
+                try:
+                    _mf_path = pathlib.Path(__file__).parent / "manifest.json"
+                    _mf = json.loads(_mf_path.read_text())
+                    _manifest_ver = _mf.get("version", "0")
+                except Exception:
+                    pass
+            hass.data[DOMAIN] = {"agents": {}, "configs": {}, "manifest_version": _manifest_ver}
 
         provider = config_data["ai_provider"]
 
@@ -309,8 +322,18 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         return result.get("message", "")
 
     # ── Core query logic (shared by WS handler and service handler) ──
-    async def _run_query(prompt: str, provider: str | None, debug: bool) -> dict:
-        """Resolve provider, run agent.process_query."""
+    async def _run_query(
+        prompt: str,
+        provider: str | None,
+        debug: bool,
+        progress_cb=None,
+    ) -> dict:
+        """Resolve provider, run agent.process_query.
+
+        *progress_cb* is an optional callable(step: str, iteration: int)
+        that the WS handler passes in so progress events can be sent
+        to the panel during long-running queries.
+        """
         if DOMAIN not in hass.data or not hass.data[DOMAIN].get("agents"):
             _LOGGER.error("No AI agents available. Please configure the integration first.")
             return {"error": "No AI agents configured"}
@@ -324,7 +347,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             _LOGGER.debug("Using fallback provider: %s", provider)
 
         agent = hass.data[DOMAIN]["agents"][provider]
+        # Inject progress callback so agent can report iteration progress
+        if progress_cb:
+            agent._progress_cb = progress_cb
         result = await agent.process_query(prompt, provider=provider, debug=debug)
+        if progress_cb:
+            agent._progress_cb = None
 
         # Template the message for structured envelopes (dashboard/automation)
         # to prevent model-generated spillover text.
@@ -351,10 +379,19 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             # Store the user prompt in the session
             _session_append(user_id, {"type": "user", "text": msg["prompt"]})
 
+            # Progress callback: sends status updates to the panel via
+            # HA event bus so the UI can show feedback during long queries.
+            def _on_progress(step: str, iteration: int):
+                hass.bus.async_fire(
+                    f"{DOMAIN}/query_progress",
+                    {"step": step, "iteration": iteration, "msg_id": msg["id"]},
+                )
+
             result = await _run_query(
                 msg["prompt"],
                 msg.get("provider"),
                 msg.get("debug", False),
+                progress_cb=_on_progress,
             )
 
             # Build a UI message dict and store it in the session
@@ -699,6 +736,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     # Panel registration with proper error handling
     panel_name = "ai_agent_ha"
+    # Cache-bust: append version so browsers fetch the new JS after HACS updates
+    _panel_version = hass.data[DOMAIN].get("manifest_version", "0")
     try:
         if await _panel_exists(hass, panel_name):
             _LOGGER.debug("AI Agent HA panel already exists, skipping registration")
@@ -715,7 +754,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             config={
                 "_panel_custom": {
                     "name": "ai_agent_ha-panel",
-                    "module_url": "/frontend/ai_agent_ha/ai_agent_ha-panel.js",
+                    "module_url": f"/frontend/ai_agent_ha/ai_agent_ha-panel.js?v={_panel_version}",
                     "embed_iframe": False,
                 }
             },
