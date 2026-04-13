@@ -246,32 +246,71 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         _LOGGER.exception("Unexpected error setting up AI Agent HA")
         raise ConfigEntryNotReady(f"Error setting up AI Agent HA: {err}")
 
-    # Modify the query service handler to use the correct provider
-    # ── State-entity response channel ──────────────────────────────
-    # Persists every response into a state entity so the panel can
-    # recover the last response after a page refresh.
-    RESPONSE_ENTITY = f"sensor.{DOMAIN}_last_response"
+    # ── Server-side session store ──────────────────────────────────
+    # Stores full chat messages (including dashboard/automation objects)
+    # per user, keyed by user_id.  Replaces localStorage persistence
+    # and the old state-entity recovery hack.
+    SESSION_TTL = 1800  # 30 minutes idle timeout
 
-    def _write_response_state(result: dict) -> None:
-        """Persist *result* to a HA state entity for post-refresh recovery."""
-        try:
-            ts = time.time()
-            payload = json.dumps(result, default=str)
-            # Cap attribute size — HA limits to ~16 KB.  Strip debug if needed.
-            if len(payload) > 16000:
-                trimmed = {k: v for k, v in result.items() if k != "debug"}
-                payload = json.dumps(trimmed, default=str)
-            hass.states.async_set(
-                RESPONSE_ENTITY,
-                str(ts),
-                {"response_json": payload, "ts": ts},
+    # sessions: { user_id: { "messages": [...], "last_active": float } }
+    sessions: dict[str, dict] = {}
+
+    def _get_session(user_id: str) -> dict:
+        """Return (or create) the session for *user_id*, enforcing TTL."""
+        now = time.time()
+        sess = sessions.get(user_id)
+        if sess and (now - sess["last_active"]) > SESSION_TTL:
+            _LOGGER.debug("Session expired for user %s (idle %.0fs)", user_id, now - sess["last_active"])
+            sess = None
+        if sess is None:
+            sess = {"messages": [], "last_active": now}
+            sessions[user_id] = sess
+        return sess
+
+    def _session_append(user_id: str, message: dict) -> None:
+        """Append a UI message to the user's session and touch last_active."""
+        sess = _get_session(user_id)
+        sess["messages"].append(message)
+        sess["last_active"] = time.time()
+        # Cap stored messages at 100 to bound memory
+        if len(sess["messages"]) > 100:
+            sess["messages"] = sess["messages"][-100:]
+
+    def _template_message(result: dict) -> str:
+        """Generate a deterministic message for structured envelopes.
+
+        For dashboard/automation responses the AI-generated 'message' field
+        is discarded in favour of a short template derived from the payload
+        metadata.  This eliminates 'spillover' where the model regurgitates
+        raw entity data (e.g. current time) into the user-facing text.
+        """
+        env_type = result.get("type", "text")
+        if env_type == "dashboard":
+            dash = result.get("dashboard", {})
+            title = dash.get("title", "New Dashboard")
+            n_views = len(dash.get("views", []))
+            n_cards = sum(
+                len(v.get("cards", [])) for v in dash.get("views", [])
             )
-        except Exception as exc:  # noqa: BLE001
-            _LOGGER.debug("Could not write response state: %s", exc)
+            return (
+                f"Here's your {title} dashboard "
+                f"with {n_views} view{'s' if n_views != 1 else ''} "
+                f"and {n_cards} card{'s' if n_cards != 1 else ''}. "
+                "Would you like me to deploy it?"
+            )
+        if env_type == "automation":
+            auto = result.get("automation", {})
+            alias = auto.get("alias", "New Automation")
+            return (
+                f"I've created the \u201c{alias}\u201d automation. "
+                "Would you like me to activate it?"
+            )
+        # text — pass through as-is
+        return result.get("message", "")
 
     # ── Core query logic (shared by WS handler and service handler) ──
     async def _run_query(prompt: str, provider: str | None, debug: bool) -> dict:
-        """Resolve provider, run agent.process_query, persist to state entity."""
+        """Resolve provider, run agent.process_query."""
         if DOMAIN not in hass.data or not hass.data[DOMAIN].get("agents"):
             _LOGGER.error("No AI agents available. Please configure the integration first.")
             return {"error": "No AI agents configured"}
@@ -286,7 +325,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
         agent = hass.data[DOMAIN]["agents"][provider]
         result = await agent.process_query(prompt, provider=provider, debug=debug)
-        _write_response_state(result)
+
+        # Template the message for structured envelopes (dashboard/automation)
+        # to prevent model-generated spillover text.
+        if result.get("success") and result.get("type") in ("dashboard", "automation"):
+            result["message"] = _template_message(result)
+            result["answer"] = result["message"]
+
         return result
 
     # ── WS query handler (primary path for the panel) ────────────────
@@ -301,17 +346,40 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     @websocket_api.async_response
     async def ws_query(hass, connection, msg):
         """Handle an AI query over WebSocket — guaranteed request/response."""
+        user_id = connection.user.id if connection.user else "default"
         try:
+            # Store the user prompt in the session
+            _session_append(user_id, {"type": "user", "text": msg["prompt"]})
+
             result = await _run_query(
                 msg["prompt"],
                 msg.get("provider"),
                 msg.get("debug", False),
             )
+
+            # Build a UI message dict and store it in the session
+            if result.get("error"):
+                ui_msg = {"type": "assistant", "text": f"Error: {result['error']}"}
+            else:
+                ui_msg = {"type": "assistant", "text": result.get("message", result.get("answer", ""))}
+                if result.get("dashboard"):
+                    ui_msg["dashboard"] = result["dashboard"]
+                if result.get("automation"):
+                    ui_msg["automation"] = result["automation"]
+                if result.get("thinking"):
+                    ui_msg["thinking"] = result["thinking"]
+                    ui_msg["thinking_duration"] = result.get("thinking_duration")
+            _session_append(user_id, ui_msg)
+
             connection.send_message(
                 websocket_api.result_message(msg["id"], result)
             )
         except Exception as e:
             _LOGGER.error("WS query error: %s", str(e), exc_info=True)
+            _session_append(user_id, {
+                "type": "assistant",
+                "text": "Error: Unable to process request. Check Home Assistant logs."
+            })
             connection.send_message(
                 websocket_api.error_message(
                     msg["id"], "query_failed",
@@ -548,33 +616,51 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     websocket_api.async_register_command(hass, ws_get_providers)
 
+    # ── WS get_session handler ───────────────────────────────────
     @websocket_api.websocket_command(
-        {vol.Required("type"): "ai_agent_ha/get_last_response"}
+        {vol.Required("type"): "ai_agent_ha/get_session"}
     )
     @websocket_api.async_response
-    async def ws_get_last_response(hass, connection, msg):
-        """Return the last query response from the state entity.
+    async def ws_get_session(hass, connection, msg):
+        """Return the full chat session for the current user.
 
-        Used by the panel for post-refresh recovery only.
+        Used by the panel on page load / refresh to restore the
+        conversation including dashboard and automation objects.
         """
-        state_obj = hass.states.get(RESPONSE_ENTITY)
-        if state_obj and state_obj.attributes.get("response_json"):
-            try:
-                data = json.loads(state_obj.attributes["response_json"])
-                data["_ts"] = state_obj.attributes.get("ts", 0)
-                connection.send_message(
-                    websocket_api.result_message(msg["id"], data)
-                )
-            except (json.JSONDecodeError, TypeError):
-                connection.send_message(
-                    websocket_api.result_message(msg["id"], None)
-                )
-        else:
-            connection.send_message(
-                websocket_api.result_message(msg["id"], None)
-            )
+        user_id = connection.user.id if connection.user else "default"
+        sess = _get_session(user_id)
+        connection.send_message(
+            websocket_api.result_message(msg["id"], {
+                "messages": sess["messages"],
+            })
+        )
 
-    websocket_api.async_register_command(hass, ws_get_last_response)
+    websocket_api.async_register_command(hass, ws_get_session)
+
+    # ── WS clear_session handler ─────────────────────────────────
+    @websocket_api.websocket_command(
+        {vol.Required("type"): "ai_agent_ha/clear_session"}
+    )
+    @websocket_api.async_response
+    async def ws_clear_session(hass, connection, msg):
+        """Clear the chat session and AI conversation history for the user."""
+        user_id = connection.user.id if connection.user else "default"
+        # Clear session messages
+        sessions.pop(user_id, None)
+        _LOGGER.debug("Cleared session for user %s", user_id)
+
+        # Also clear the AI agent's conversation_history so the next
+        # prompt starts fresh (prevents stale context from leaking).
+        domain_data = hass.data.get(DOMAIN, {})
+        for agent in domain_data.get("agents", {}).values():
+            if hasattr(agent, "clear_conversation_history"):
+                agent.clear_conversation_history()
+
+        connection.send_message(
+            websocket_api.result_message(msg["id"], {"success": True})
+        )
+
+    websocket_api.async_register_command(hass, ws_clear_session)
 
     # Register services
     hass.services.async_register(DOMAIN, "query", async_handle_query)
