@@ -248,82 +248,93 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     # Modify the query service handler to use the correct provider
     # ── State-entity response channel ──────────────────────────────
-    # The event bus is fire-and-forget; if the frontend panel isn't
-    # listening when the event fires (slow LLM round-trips, browser
-    # refresh) the response is lost.  We now *also* persist every
-    # response into a state entity so the panel can poll it as a
-    # fallback.
+    # Persists every response into a state entity so the panel can
+    # recover the last response after a page refresh.
     RESPONSE_ENTITY = f"sensor.{DOMAIN}_last_response"
 
-    # In-memory debug blob store — kept separate from the state entity
-    # to avoid the 16 KB attribute-size limit.  Only the most recent
-    # response's debug data is retained.
-    _last_debug_blob = None   # most recent debug dict (or None)
-    _last_debug_ts = 0         # timestamp matching the debug blob
-
     def _write_response_state(result: dict) -> None:
-        """Persist *result* to a HA state entity for frontend fallback."""
-        nonlocal _last_debug_blob, _last_debug_ts
+        """Persist *result* to a HA state entity for post-refresh recovery."""
         try:
             ts = time.time()
-            # Preserve debug blob in memory so the WS endpoint can serve
-            # it regardless of state-entity size limits.
-            if result.get("debug"):
-                _last_debug_blob = result["debug"]
-                _last_debug_ts = ts
-            else:
-                _last_debug_blob = None
-                _last_debug_ts = ts
-            # Truncate large payloads for state — HA limits attribute size.
-            # Always strip debug from the state entity; it's served via WS.
-            trimmed = {k: v for k, v in result.items() if k != "debug"}
-            payload = json.dumps(trimmed, default=str)
+            payload = json.dumps(result, default=str)
+            # Cap attribute size — HA limits to ~16 KB.  Strip debug if needed.
+            if len(payload) > 16000:
+                trimmed = {k: v for k, v in result.items() if k != "debug"}
+                payload = json.dumps(trimmed, default=str)
             hass.states.async_set(
                 RESPONSE_ENTITY,
-                str(ts),  # state = timestamp (changes each response)
+                str(ts),
                 {"response_json": payload, "ts": ts},
             )
         except Exception as exc:  # noqa: BLE001
             _LOGGER.debug("Could not write response state: %s", exc)
 
-    async def async_handle_query(call):
-        """Handle the query service call."""
+    # ── Core query logic (shared by WS handler and service handler) ──
+    async def _run_query(prompt: str, provider: str | None, debug: bool) -> dict:
+        """Resolve provider, run agent.process_query, persist to state entity."""
+        if DOMAIN not in hass.data or not hass.data[DOMAIN].get("agents"):
+            _LOGGER.error("No AI agents available. Please configure the integration first.")
+            return {"error": "No AI agents configured"}
+
+        if provider not in hass.data[DOMAIN]["agents"]:
+            available_providers = list(hass.data[DOMAIN]["agents"].keys())
+            if not available_providers:
+                _LOGGER.error("No AI agents available")
+                return {"error": "No AI agents configured"}
+            provider = available_providers[0]
+            _LOGGER.debug("Using fallback provider: %s", provider)
+
+        agent = hass.data[DOMAIN]["agents"][provider]
+        result = await agent.process_query(prompt, provider=provider, debug=debug)
+        _write_response_state(result)
+        return result
+
+    # ── WS query handler (primary path for the panel) ────────────────
+    @websocket_api.websocket_command(
+        {
+            vol.Required("type"): "ai_agent_ha/query",
+            vol.Required("prompt"): cv.string,
+            vol.Optional("provider"): cv.string,
+            vol.Optional("debug", default=False): cv.boolean,
+        }
+    )
+    @websocket_api.async_response
+    async def ws_query(hass, connection, msg):
+        """Handle an AI query over WebSocket — guaranteed request/response."""
         try:
-            # Check if agents are available
-            if DOMAIN not in hass.data or not hass.data[DOMAIN].get("agents"):
-                _LOGGER.error(
-                    "No AI agents available. Please configure the integration first."
-                )
-                result = {"error": "No AI agents configured"}
-                _write_response_state(result)
-                hass.bus.async_fire("ai_agent_ha_response", result)
-                return
-
-            provider = call.data.get("provider")
-            if provider not in hass.data[DOMAIN]["agents"]:
-                # Get the first available provider
-                available_providers = list(hass.data[DOMAIN]["agents"].keys())
-                if not available_providers:
-                    _LOGGER.error("No AI agents available")
-                    result = {"error": "No AI agents configured"}
-                    _write_response_state(result)
-                    hass.bus.async_fire("ai_agent_ha_response", result)
-                    return
-                provider = available_providers[0]
-                _LOGGER.debug(f"Using fallback provider: {provider}")
-
-            agent = hass.data[DOMAIN]["agents"][provider]
-            result = await agent.process_query(
-                call.data.get("prompt", ""),
-                provider=provider,
-                debug=call.data.get("debug", False),
+            result = await _run_query(
+                msg["prompt"],
+                msg.get("provider"),
+                msg.get("debug", False),
             )
-            _write_response_state(result)
+            connection.send_message(
+                websocket_api.result_message(msg["id"], result)
+            )
+        except Exception as e:
+            _LOGGER.error("WS query error: %s", str(e), exc_info=True)
+            connection.send_message(
+                websocket_api.error_message(
+                    msg["id"], "query_failed",
+                    "Unable to process request. Check Home Assistant logs."
+                )
+            )
+
+    websocket_api.async_register_command(hass, ws_query)
+
+    # ── Service handler (kept for automations / scripts) ─────────────
+    async def async_handle_query(call):
+        """Handle the query service call (non-panel callers)."""
+        try:
+            result = await _run_query(
+                call.data.get("prompt", ""),
+                call.data.get("provider"),
+                call.data.get("debug", False),
+            )
+            # Fire event for any external listeners (not used by the panel)
             hass.bus.async_fire("ai_agent_ha_response", result)
         except Exception as e:
             _LOGGER.error("Query service error: %s", str(e), exc_info=True)
             result = {"error": "Unable to process request. Check Home Assistant logs for details."}
-            _write_response_state(result)
             hass.bus.async_fire("ai_agent_ha_response", result)
 
     async def async_handle_create_automation(call):
@@ -544,20 +555,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     async def ws_get_last_response(hass, connection, msg):
         """Return the last query response from the state entity.
 
-        The frontend uses this as a fallback when the event-bus delivery
-        is missed (slow LLM round-trips, browser refresh, etc.).
-        Debug data is re-attached from the in-memory store so it
-        survives the 16 KB state-entity trim.
+        Used by the panel for post-refresh recovery only.
         """
         state_obj = hass.states.get(RESPONSE_ENTITY)
         if state_obj and state_obj.attributes.get("response_json"):
             try:
                 data = json.loads(state_obj.attributes["response_json"])
-                ts = state_obj.attributes.get("ts", 0)
-                data["_ts"] = ts
-                # Re-attach debug blob if it belongs to this response
-                if _last_debug_blob and _last_debug_ts == ts:
-                    data["debug"] = _last_debug_blob
+                data["_ts"] = state_obj.attributes.get("ts", 0)
                 connection.send_message(
                     websocket_api.result_message(msg["id"], data)
                 )
