@@ -255,16 +255,29 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # fallback.
     RESPONSE_ENTITY = f"sensor.{DOMAIN}_last_response"
 
+    # In-memory debug blob store — kept separate from the state entity
+    # to avoid the 16 KB attribute-size limit.  Only the most recent
+    # response's debug data is retained.
+    _last_debug_blob = None   # most recent debug dict (or None)
+    _last_debug_ts = 0         # timestamp matching the debug blob
+
     def _write_response_state(result: dict) -> None:
         """Persist *result* to a HA state entity for frontend fallback."""
+        nonlocal _last_debug_blob, _last_debug_ts
         try:
             ts = time.time()
+            # Preserve debug blob in memory so the WS endpoint can serve
+            # it regardless of state-entity size limits.
+            if result.get("debug"):
+                _last_debug_blob = result["debug"]
+                _last_debug_ts = ts
+            else:
+                _last_debug_blob = None
+                _last_debug_ts = ts
             # Truncate large payloads for state — HA limits attribute size.
-            payload = json.dumps(result, default=str)
-            if len(payload) > 16000:
-                # Keep answer + success/error but drop debug blob
-                trimmed = {k: v for k, v in result.items() if k != "debug"}
-                payload = json.dumps(trimmed, default=str)
+            # Always strip debug from the state entity; it's served via WS.
+            trimmed = {k: v for k, v in result.items() if k != "debug"}
+            payload = json.dumps(trimmed, default=str)
             hass.states.async_set(
                 RESPONSE_ENTITY,
                 str(ts),  # state = timestamp (changes each response)
@@ -533,12 +546,18 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
         The frontend uses this as a fallback when the event-bus delivery
         is missed (slow LLM round-trips, browser refresh, etc.).
+        Debug data is re-attached from the in-memory store so it
+        survives the 16 KB state-entity trim.
         """
         state_obj = hass.states.get(RESPONSE_ENTITY)
         if state_obj and state_obj.attributes.get("response_json"):
             try:
                 data = json.loads(state_obj.attributes["response_json"])
-                data["_ts"] = state_obj.attributes.get("ts", 0)
+                ts = state_obj.attributes.get("ts", 0)
+                data["_ts"] = ts
+                # Re-attach debug blob if it belongs to this response
+                if _last_debug_blob and _last_debug_ts == ts:
+                    data["debug"] = _last_debug_blob
                 connection.send_message(
                     websocket_api.result_message(msg["id"], data)
                 )
@@ -646,7 +665,7 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 async def _panel_exists(hass: HomeAssistant, panel_name: str) -> bool:
     """Check if a panel already exists."""
     try:
-        return hasattr(hass.data, "frontend_panels") and panel_name in hass.data.get(
+        return "frontend_panels" in hass.data and panel_name in hass.data.get(
             "frontend_panels", {}
         )
     except Exception as e:
