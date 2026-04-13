@@ -74,21 +74,8 @@ function extractJSONFromText(text) {
   return null;
 }
 
-// Legacy key (pre-v1.1.0) — cleared on first opt-in load
-const CHAT_STORAGE_KEY = 'ai_agent_ha_chat_history';
-
-// v1.1.0 secure persistence — opt-in, per-user, per-provider
-const CHAT_STORAGE_VERSION = 1;
-const CHAT_STORAGE_MAX_MESSAGES = 50;
-
-function chatStorageKey(userId, provider) {
-  return `ai_agent_ha_v1_${userId || 'anon'}_${provider || 'default'}`;
-}
-
-function scrubForStorage(text) {
-  if (!text || typeof text !== 'string') return text;
-  return text.replace(/\b(sk-[A-Za-z0-9]{20,}|[A-Za-z0-9_\-]{32,})\b/g, '[REDACTED]');
-}
+// localStorage key for prompt history only (chat messages are server-side now)
+const PROMPT_HISTORY_STORAGE_KEY = 'ai_agent_ha_prompt_history';
 
 const PROVIDERS = {
   openai: "OpenAI",
@@ -197,7 +184,6 @@ class AiAgentHaPanel extends LitElement {
       _existingDashboards: { type: Array, reflect: false, attribute: false },
       _dashboardPickerLoading: { type: Boolean, reflect: false, attribute: false },
       _activeSuggestionDashboard: { type: Object, reflect: false, attribute: false },
-      _persistenceEnabled: { type: Boolean, reflect: false, attribute: false },
       _isStreaming: { type: Boolean, reflect: false, attribute: false },
       _streamingText: { type: String, reflect: false, attribute: false },
       _dashboardChangeActive: { type: Object, reflect: false, attribute: false },
@@ -487,11 +473,6 @@ class AiAgentHaPanel extends LitElement {
         padding: 4px 8px;
         border-radius: 12px;
         background: var(--secondary-background-color, rgba(0,0,0,0.05));
-      }
-      .persistence-indicator {
-        font-size: 0.75rem;
-        opacity: 0.6;
-        cursor: default;
       }
       .thinking-toggle {
         display: flex;
@@ -941,13 +922,12 @@ class AiAgentHaPanel extends LitElement {
 
   constructor() {
     super();
-    this._messages = this._loadMessages();
+    this._messages = [];  // Restored from server-side session in connectedCallback
     this._isLoading = false;
     this._error = null;
     this._pendingAutomation = null;
     this._promptHistory = [];
     this._promptHistoryLoaded = false;
-    this._lastResponseTs = 0; // Track last response timestamp (for post-refresh recovery)
     this._activeQueryAbort = null; // AbortController-like flag for the current WS query
     this._dashboardDisplayMode = localStorage.getItem(DASHBOARD_MODE_KEY) || 'visual'; // 'visual' or 'yaml'
     this._perMessageYamlToggle = {}; // per-message overrides: msgIndex -> 'visual'|'yaml'
@@ -980,7 +960,6 @@ class AiAgentHaPanel extends LitElement {
     this._existingDashboards = [];
     this._dashboardPickerLoading = false;
     this._activeSuggestionDashboard = null;
-    this._persistenceEnabled = false;
     this._isStreaming = false;
     this._streamingText = '';
     this._streamChunkUnsub = null;
@@ -990,84 +969,19 @@ class AiAgentHaPanel extends LitElement {
     console.debug("AI Agent HA Panel constructor called");
   }
 
-  _loadMessages() {
-    // Legacy loader for backward compat (pre-opt-in). Returns any old messages.
+  async _restoreSession() {
+    // Restore full chat session (including dashboard/automation objects)
+    // from the server-side session store.
     try {
-      const raw = localStorage.getItem(CHAT_STORAGE_KEY);
-      if (!raw) return [];
-      const parsed = JSON.parse(raw);
-      if (!Array.isArray(parsed)) return [];
-      console.debug('AI Agent HA: restored', parsed.length, 'messages from legacy localStorage');
-      return parsed;
-    } catch (e) {
-      console.warn('AI Agent HA: failed to load chat history from localStorage:', e);
-      return [];
-    }
-  }
-
-  _saveMessages() {
-    // Legacy save (pre-opt-in). Only saves if persistence is NOT enabled (fallback).
-    if (this._persistenceEnabled) return;
-    try {
-      const toSave = this._messages.length > CHAT_STORAGE_MAX_MESSAGES
-        ? this._messages.slice(-CHAT_STORAGE_MAX_MESSAGES)
-        : this._messages;
-      localStorage.setItem(CHAT_STORAGE_KEY, JSON.stringify(toSave));
-    } catch (e) {
-      console.warn('AI Agent HA: failed to save chat history to localStorage:', e);
-    }
-  }
-
-  _saveHistoryToStorage() {
-    if (!this._persistenceEnabled) return;
-    if (!this.hass?.user?.id) return;
-    try {
-      const key = chatStorageKey(this.hass.user.id, this._selectedProvider);
-      const toStore = this._messages
-        .filter(m => m.type && m.text)
-        .slice(-CHAT_STORAGE_MAX_MESSAGES)
-        .map(m => ({ type: m.type, text: scrubForStorage(m.text) }));
-      localStorage.setItem(key, JSON.stringify({
-        version: CHAT_STORAGE_VERSION,
-        provider: this._selectedProvider,
-        timestamp: Date.now(),
-        messages: toStore
-      }));
-    } catch (e) {
-      console.warn('AI Agent HA: failed to save chat history:', e);
-    }
-  }
-
-  _loadHistoryFromStorage() {
-    if (!this._persistenceEnabled) return;
-    if (!this.hass?.user?.id) return;
-    try {
-      const key = chatStorageKey(this.hass.user.id, this._selectedProvider);
-      const raw = localStorage.getItem(key);
-      if (!raw) return;
-      const stored = JSON.parse(raw);
-      if (stored.version !== CHAT_STORAGE_VERSION) {
-        localStorage.removeItem(key);
-        return;
-      }
-      const sevenDays = 7 * 24 * 60 * 60 * 1000;
-      if (stored.provider !== this._selectedProvider) return;
-      if (Date.now() - stored.timestamp > sevenDays) {
-        localStorage.removeItem(key);
-        return;
-      }
-      if (stored.messages && stored.messages.length > 0) {
-        this._messages = stored.messages;
-        // Clear legacy storage now that we have opt-in persistence
-        try { localStorage.removeItem(CHAT_STORAGE_KEY); } catch (_) {}
+      const session = await this.hass.callWS({ type: 'ai_agent_ha/get_session' });
+      if (session && session.messages && session.messages.length > 0) {
+        this._messages = session.messages;
+        console.debug('AI Agent HA: restored', this._messages.length, 'messages from server session');
         this.requestUpdate();
+        this._scrollToBottom();
       }
     } catch (e) {
-      console.warn('AI Agent HA: failed to load chat history:', e);
-      try {
-        const key = chatStorageKey(this.hass.user.id, this._selectedProvider);
-        localStorage.removeItem(key);
-      } catch (_) {}
+      console.debug('AI Agent HA: session restore failed:', e);
     }
   }
 
@@ -1097,16 +1011,15 @@ class AiAgentHaPanel extends LitElement {
       // Load prompt history from Home Assistant storage
       await this._loadPromptHistory();
 
-      // Post-refresh recovery: check the state entity for a response
-      // generated within the last 60 seconds (covers page refresh).
-      this._tryRecoverLastResponse();
+      // Restore chat session from server-side store
+      this._restoreSession();
     }
 
-    // Clear all ai_agent_ha storage on HA logout
+    // Clear ai_agent_ha localStorage on HA logout (prompt history etc.)
     this._logoutHandler = () => {
       try {
         Object.keys(localStorage)
-          .filter(k => k.startsWith('ai_agent_ha_v1_'))
+          .filter(k => k.startsWith('ai_agent_ha_'))
           .forEach(k => localStorage.removeItem(k));
       } catch (e) {}
     };
@@ -1146,11 +1059,6 @@ class AiAgentHaPanel extends LitElement {
   async updated(changedProps) {
     console.debug("Updated called with:", changedProps);
 
-    // Persist chat history whenever messages change
-    if (changedProps.has('_messages')) {
-      this._saveMessages();
-    }
-
     // Load providers when hass becomes available
     if (changedProps.has('hass') && this.hass && !this.providersLoaded) {
       this.providersLoaded = true;
@@ -1158,8 +1066,6 @@ class AiAgentHaPanel extends LitElement {
       try {
         // Primary: use ai_agent_ha/get_providers — authoritative, no credential exposure
         let providers = [];
-        let persistenceEnabled = false;
-        let streamingEnabled = false;
 
         try {
           const providerData = await this.hass.callWS({ type: 'ai_agent_ha/get_providers' });
@@ -1169,8 +1075,6 @@ class AiAgentHaPanel extends LitElement {
               label: p.label,
               model: p.model || ''
             }));
-            persistenceEnabled = providerData.some(p => p.persist_chat_history);
-            streamingEnabled = providerData.some(p => p.enable_streaming);
             console.debug("AI Agent HA: providers loaded via get_providers WS:", providers);
           }
         } catch (wsErr) {
@@ -1190,21 +1094,14 @@ class AiAgentHaPanel extends LitElement {
 
         if (providers.length > 0) {
           this._availableProviders = providers;
-          this._persistenceEnabled = persistenceEnabled;
 
           console.debug("Available AI providers:", this._availableProviders);
-          console.debug("Chat persistence enabled:", this._persistenceEnabled);
 
           if (
             (!this._selectedProvider || !providers.find(p => p.value === this._selectedProvider)) &&
             providers.length > 0
           ) {
             this._selectedProvider = providers[0].value;
-          }
-
-          // Load persisted history if enabled
-          if (this._persistenceEnabled) {
-            this._loadHistoryFromStorage();
           }
         } else {
           console.debug("No 'ai_agent_ha' providers found.");
@@ -1634,8 +1531,7 @@ class AiAgentHaPanel extends LitElement {
                   const p = this._availableProviders.find(p => p.value === this._selectedProvider);
                   const providerLabel = p ? p.label : (this._selectedProvider || 'No provider configured');
                   const modelLabel = p?.model ? ` \u00b7 ${p.model}` : '';
-                  return html`<span class="provider-label">${providerLabel}${modelLabel}</span>
-                    ${this._persistenceEnabled ? html`<span class="persistence-indicator" title="Chat history is saved locally">\u{1F4BE}</span>` : ''}`;
+                  return html`<span class="provider-label">${providerLabel}${modelLabel}</span>`;
                 })()}
               </div>
               <label class="thinking-toggle">
@@ -1791,23 +1687,6 @@ class AiAgentHaPanel extends LitElement {
     this.requestUpdate();
   }
 
-  async _tryRecoverLastResponse() {
-    // On page load / refresh, check the state entity for a response
-    // generated within the last 60 seconds.  Restores the result if
-    // the last chat message is from the user (reply was lost).
-    try {
-      const snap = await this.hass.callWS({ type: 'ai_agent_ha/get_last_response' });
-      if (!snap || !snap._ts) return;
-      const ageSec = (Date.now() / 1000) - snap._ts;
-      if (ageSec > 60) return;
-      const lastMsg = this._messages[this._messages.length - 1];
-      if (this._messages.length > 0 && (!lastMsg || lastMsg.type !== 'user')) return;
-      console.debug('Post-refresh recovery: restoring response, age', ageSec.toFixed(1), 's');
-      this._processQueryResult(snap);
-    } catch (e) {
-      console.debug('Post-refresh recovery failed:', e);
-    }
-  }
 
   _handleStreamChunk(event) {
     const text = event.data?.text || '';
@@ -1839,13 +1718,6 @@ class AiAgentHaPanel extends LitElement {
       if (this._showThinking && this._debugInfo) {
         this._thinkingExpanded = true;
       }
-      // Track timestamp for post-refresh recovery
-      if (data._ts) {
-        this._lastResponseTs = data._ts;
-      } else {
-        this._lastResponseTs = Date.now() / 1000;
-      }
-
       if (data.success) {
         // ── Typed-envelope handler ──────────────────────────────
         const envType = data.type || 'text';
@@ -1911,7 +1783,6 @@ class AiAgentHaPanel extends LitElement {
 
         console.debug('Adding message to UI:', message);
         this._messages = [...this._messages, message];
-        this._saveHistoryToStorage();
       } else {
         this._error = data.error || 'An error occurred';
         this._messages = [
@@ -2219,7 +2090,6 @@ class AiAgentHaPanel extends LitElement {
            changedProps.has('_dashboardPickerActive') ||
            changedProps.has('_existingDashboards') ||
            changedProps.has('_dashboardPickerLoading') ||
-           changedProps.has('_persistenceEnabled') ||
            changedProps.has('_isStreaming') ||
            changedProps.has('_streamingText') ||
            changedProps.has('_dashboardChangeActive') ||
@@ -2229,7 +2099,7 @@ class AiAgentHaPanel extends LitElement {
            changedProps.has('_thinkingExpanded');
   }
 
-  _clearChat() {
+  async _clearChat() {
     this._messages = [];
     this._clearLoadingState();
     this._error = null;
@@ -2237,15 +2107,12 @@ class AiAgentHaPanel extends LitElement {
     this._debugInfo = null;
     this._isStreaming = false;
     this._streamingText = '';
-    // Clear persisted chat history (both legacy and new)
+    // Clear server-side session + AI conversation history
     try {
-      localStorage.removeItem(CHAT_STORAGE_KEY);
-      if (this._persistenceEnabled) {
-        localStorage.removeItem(chatStorageKey(this.hass?.user?.id, this._selectedProvider));
-      }
-      console.debug('AI Agent HA: cleared chat history from localStorage');
+      await this.hass.callWS({ type: 'ai_agent_ha/clear_session' });
+      console.debug('AI Agent HA: cleared server-side session');
     } catch (e) {
-      console.warn('AI Agent HA: failed to clear chat history from localStorage:', e);
+      console.warn('AI Agent HA: failed to clear server session:', e);
     }
     // Clear dashboard suggestion UI state
     this._dashboardChangeActive = null;
