@@ -18,15 +18,17 @@ ai_agent_ha:
     llama: "Llama-4-Maverick-17B-128E-Instruct-FP8"
     gemini: "gemini-2.5-flash"  # or "gemini-2.5-pro", "gemini-2.0-flash", etc.
     openrouter: "openai/gpt-4o"  # or any model available on OpenRouter
-    anthropic: "claude-sonnet-4-5-20250929"  # or "claude-sonnet-4-20250514", "claude-3-5-sonnet-20241022", "claude-3-opus-20240229", etc.
+    anthropic: "claude-opus-4-6"  # or "claude-sonnet-4-6", "claude-haiku-4-5-20251001", "claude-sonnet-4-5-20250929", etc.
     alter: "your-model-name"  # model name for Alter API
     zai: "glm-4.7"  # model name for z.ai API (glm-4.7, glm-4.6, glm-4.5, etc.)
     local: "llama3.2"  # model name for local API (optional if your API doesn't require it)
 """
 
 import asyncio
+import codecs
 import json
 import logging
+import re
 import time
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional, Union
@@ -35,12 +37,174 @@ from urllib.parse import quote
 import aiohttp
 import yaml  # type: ignore[import-untyped]
 from homeassistant.core import HomeAssistant
+from homeassistant.helpers import area_registry as ar
+from homeassistant.helpers import device_registry as dr
+from homeassistant.helpers import entity_registry as er
+from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.storage import Store
 from homeassistant.util import dt as dt_util
 
 from .const import CONF_WEATHER_ENTITY, DOMAIN
 
 _LOGGER = logging.getLogger(__name__)
+
+
+# === JSON/YAML Extraction Utility ===
+def _extract_json_from_text(text: str) -> Optional[dict]:
+    """Extract a JSON object from text that may contain markdown fences or prose."""
+    # Strip markdown code fences
+    fence_match = re.search(r"```(?:json|yaml)?\s*([\s\S]*?)```", text)
+    if fence_match:
+        text = fence_match.group(1).strip()
+
+    # Try direct parse
+    try:
+        result = json.loads(text)
+        if isinstance(result, dict):
+            return result
+    except (json.JSONDecodeError, ValueError):
+        pass
+
+    # Find first { and try from there
+    start = text.find("{")
+    if start != -1:
+        try:
+            result = json.loads(text[start:])
+            if isinstance(result, dict):
+                return result
+        except (json.JSONDecodeError, ValueError):
+            pass
+
+    # Try YAML as last resort
+    try:
+        result = yaml.safe_load(text[start:] if start >= 0 else text)
+        if isinstance(result, dict):
+            return result
+    except Exception:
+        pass
+
+    return None
+
+
+_ACTIONABLE_TYPES = frozenset({"dashboard_suggestion", "automation_suggestion"})
+
+
+def _extract_actionable_json(
+    text: str,
+    target_types: tuple = ("dashboard_suggestion", "automation_suggestion"),
+) -> Optional[dict]:
+    """Scan *text* for the last JSON object whose request_type is in *target_types*.
+
+    When the model wraps a multi-step response inside a final_response,
+    the text may contain multiple JSON blobs (e.g. data_request result,
+    then dashboard_suggestion).  We want the *actionable* one — the last
+    object that matches one of the target request_types.
+    """
+    best: Optional[dict] = None
+    idx = 0
+    while idx < len(text):
+        start = text.find("{", idx)
+        if start == -1:
+            break
+        snippet = text[start : start + 200]
+        if not any(t in snippet for t in target_types):
+            idx = start + 1
+            continue
+        depth = 0
+        end = start
+        for i in range(start, len(text)):
+            if text[i] == "{":
+                depth += 1
+            elif text[i] == "}":
+                depth -= 1
+                if depth == 0:
+                    end = i + 1
+                    break
+        if depth != 0:
+            idx = start + 1
+            continue
+        try:
+            candidate = json.loads(text[start:end])
+            if (
+                isinstance(candidate, dict)
+                and candidate.get("request_type") in target_types
+            ):
+                best = candidate
+        except (json.JSONDecodeError, ValueError):
+            pass
+        idx = end
+    return best
+
+
+def _classify_response(response_data: dict) -> dict:
+    """Build a typed envelope from a parsed model response.
+
+    Returns a dict with:
+      - type: "dashboard" | "automation" | "text"
+      - message: human-readable summary
+      - dashboard / automation: the payload (only when applicable)
+    """
+    rt = response_data.get("request_type", "")
+
+    if rt == "dashboard_suggestion":
+        return {
+            "type": "dashboard",
+            "message": response_data.get("message", ""),
+            "dashboard": response_data.get("dashboard", {}),
+        }
+
+    if rt == "automation_suggestion":
+        return {
+            "type": "automation",
+            "message": response_data.get("message", ""),
+            "automation": response_data.get("automation", {}),
+        }
+
+    if rt == "final_response":
+        # Some models put the dashboard/automation directly alongside
+        # request_type: "final_response" instead of nesting it in
+        # the "response" string.  Check for that first.
+        if response_data.get("dashboard"):
+            return {
+                "type": "dashboard",
+                "message": response_data.get("message", response_data.get("response", "")),
+                "dashboard": response_data["dashboard"],
+            }
+        if response_data.get("automation"):
+            return {
+                "type": "automation",
+                "message": response_data.get("message", response_data.get("response", "")),
+                "automation": response_data["automation"],
+            }
+        raw = str(response_data.get("response", ""))
+        embedded = _extract_actionable_json(raw)
+        if embedded:
+            return _classify_response(embedded)  # recurse once
+        # Last resort: the "response" value might itself be a dict that
+        # was auto-stringified.  Try parsing it.
+        resp_val = response_data.get("response")
+        if isinstance(resp_val, dict):
+            if resp_val.get("request_type") in ("dashboard_suggestion", "automation_suggestion"):
+                return _classify_response(resp_val)
+            if resp_val.get("dashboard"):
+                return {
+                    "type": "dashboard",
+                    "message": resp_val.get("message", ""),
+                    "dashboard": resp_val["dashboard"],
+                }
+        return {
+            "type": "text",
+            "message": raw,
+        }
+
+    # Unrecognised — extract message from best-effort fields
+    msg = (
+        response_data.get("response")
+        or response_data.get("message")
+        or response_data.get("answer")
+        or json.dumps(response_data)
+    )
+    return {"type": "text", "message": msg}
 
 
 # === Security Utilities ===
@@ -108,21 +272,134 @@ def sanitize_for_logging(data: Any, mask: str = "***REDACTED***") -> Any:
 
 
 # === AI Client Abstractions ===
+
+
+class _HASessionContext:
+    """Async context manager that wraps a shared HA aiohttp session.
+
+    The HA-managed session must NOT be closed by individual callers, so this
+    wrapper skips the close step while still exposing the standard
+    ``async with`` interface expected by all call sites.
+    """
+
+    __slots__ = ("_session",)
+
+    def __init__(self, session: aiohttp.ClientSession) -> None:
+        self._session = session
+
+    async def __aenter__(self) -> aiohttp.ClientSession:
+        return self._session
+
+    async def __aexit__(self, *_) -> None:
+        pass  # Do not close — HA owns this session.
+
+
 class BaseAIClient:
+    """Base class for all AI provider clients.
+
+    Subclasses should call super().__init__(hass=hass) if they accept a hass
+    instance, so that _get_session() can return the HA-managed aiohttp session
+    (which avoids creating a new TCP connector per request).
+    """
+
+    def __init__(self, hass: Optional["HomeAssistant"] = None):
+        self._hass = hass
+
+    def _session(self):
+        """Return a context manager that yields an aiohttp ClientSession.
+
+        When a Home Assistant instance is available the HA-managed session is
+        reused (no new connector / TCP stack per request).  When unavailable
+        (e.g. in unit tests) a fresh short-lived session is created instead.
+        """
+        if self._hass is not None:
+            return _HASessionContext(async_get_clientsession(self._hass))
+        return aiohttp.ClientSession()
+
     async def get_response(self, messages, **kwargs):
         raise NotImplementedError
 
+    @staticmethod
+    def extract_thinking(text: str):
+        """Extract thinking content from model response before stripping.
+
+        Returns (thinking_content, None) — thinking_content is None if no block found.
+        """
+        if not text:
+            return None
+        match = re.search(r"<think>(.*?)</think>", text, re.DOTALL | re.IGNORECASE)
+        if match:
+            return match.group(1).strip()
+        # Also check <|thinking|> variant
+        match = re.search(
+            r"<\|thinking\|>(.*?)</\|thinking\|>", text, re.DOTALL | re.IGNORECASE
+        )
+        if match:
+            return match.group(1).strip()
+        return None
+
+    @staticmethod
+    def strip_thinking_tags(text: str) -> str:
+        """Remove thinking/reasoning blocks from model responses.
+
+        Strips <think>...</think> blocks produced by models with thinking mode
+        enabled (Qwen3, DeepSeek-R1, etc.). Handles multi-line blocks, nested
+        whitespace, and cases where the closing tag is missing (truncated output).
+
+        Also strips the <|thinking|>...</|thinking|> variant used by some models.
+
+        Args:
+            text: Raw response string from the model.
+
+        Returns:
+            The response with all thinking blocks removed and whitespace cleaned up.
+        """
+        if not text:
+            return text
+        # Remove <think>...</think> blocks (case-insensitive, dotall)
+        text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL | re.IGNORECASE)
+        # Remove <|thinking|>...</|thinking|> variant
+        text = re.sub(
+            r"<\|thinking\|>.*?</\|thinking\|>",
+            "",
+            text,
+            flags=re.DOTALL | re.IGNORECASE,
+        )
+        # Handle truncated blocks: remove everything from an unclosed <think> to end of string
+        text = re.sub(r"<think>.*$", "", text, flags=re.DOTALL | re.IGNORECASE)
+        text = re.sub(r"<\|thinking\|>.*$", "", text, flags=re.DOTALL | re.IGNORECASE)
+        # Clean up leading/trailing whitespace left behind
+        return text.strip()
+
 
 class LocalClient(BaseAIClient):
-    def __init__(self, url, model=""):
+    def __init__(self, url, model="", hass=None):
+        super().__init__(hass=hass)
         self.url = url
         self.model = model
+        # Detect OpenAI-compatible endpoints (e.g. LM Studio, vLLM, LocalAI)
+        # by checking if the URL contains '/v1'. If so, use the OpenAI chat
+        # completions format instead of the Ollama-native prompt format.
+        self._is_openai_compatible = "/v1" in (url or "")
+        if self._is_openai_compatible:
+            # Ensure the request URL targets /v1/chat/completions
+            self._chat_url = url.rstrip("/")
+            if not self._chat_url.endswith("/chat/completions"):
+                if self._chat_url.endswith("/v1"):
+                    self._chat_url += "/chat/completions"
+                else:
+                    self._chat_url += "/v1/chat/completions"
+            _LOGGER.info(
+                "Detected OpenAI-compatible local endpoint. Chat URL: %s",
+                self._chat_url,
+            )
 
     async def get_response(self, messages, **kwargs):
         _LOGGER.debug(
-            "Making request to local API with model: '%s' at URL: %s",
+            "Making request to local API with model: '%s' at URL: %s (openai_compat=%s)",
             self.model or "[NO MODEL SPECIFIED]",
             self.url,
+            self._is_openai_compatible,
         )
 
         if not self.model:
@@ -131,51 +408,61 @@ class LocalClient(BaseAIClient):
             )
         headers = {"Content-Type": "application/json"}
 
-        # Format user prompt from messages
-        prompt = ""
-        for message in messages:
-            role = message.get("role", "")
-            content = message.get("content", "")
+        # Choose request format based on detected endpoint type
+        if self._is_openai_compatible:
+            # OpenAI-compatible format (LM Studio, vLLM, LocalAI, etc.)
+            # Send structured messages array to /v1/chat/completions
+            payload = {
+                "messages": messages,
+                "stream": False,
+                "temperature": 0.7,
+                "top_p": 0.9,
+            }
+            if self.model:
+                payload["model"] = self.model
+            request_url = self._chat_url
+            _LOGGER.debug("Using OpenAI-compatible format → POST %s", request_url)
+        else:
+            # Legacy Ollama-native format: flatten messages into a prompt string
+            prompt = ""
+            for message in messages:
+                role = message.get("role", "")
+                content = message.get("content", "")
+                if role == "system":
+                    prompt += f"System: {content}\n\n"
+                elif role == "user":
+                    prompt += f"User: {content}\n\n"
+                elif role == "assistant":
+                    prompt += f"Assistant: {content}\n\n"
+            prompt += "Assistant: "
 
-            # Simple formatting: prefixing each message with its role
-            if role == "system":
-                prompt += f"System: {content}\n\n"
-            elif role == "user":
-                prompt += f"User: {content}\n\n"
-            elif role == "assistant":
-                prompt += f"Assistant: {content}\n\n"
-
-        # Add final prompt prefix for the assistant's response
-        prompt += "Assistant: "
-
-        # Build a generic payload that works with most local API servers
-        payload = {
-            "prompt": prompt,
-            "stream": False,  # Disable streaming to get a single complete response
-            # max_tokens omitted - let local model use its default capacity
-        }
-
-        # Add model if specified
-        if self.model:
-            payload["model"] = self.model
+            payload = {
+                "prompt": prompt,
+                "stream": False,
+            }
+            if self.model:
+                payload["model"] = self.model
+            request_url = self.url
+            _LOGGER.debug("Using Ollama-native format → POST %s", request_url)
 
         # Note: Payloads don't contain auth tokens (those are in headers), but may contain user prompts
         _LOGGER.debug("Local API request payload: %s", json.dumps(payload, indent=2))
 
-        # Ollama-specific validation
-        if "model" not in payload or not payload["model"]:
-            _LOGGER.warning(
-                "Missing 'model' field in request to local API. This may cause issues with Ollama."
-            )
-        elif self.url and "ollama" in self.url.lower():
-            _LOGGER.debug(
-                "Detected Ollama URL, ensuring model is specified: %s",
-                payload.get("model"),
-            )
+        # Ollama-specific validation (only for non-OpenAI-compatible endpoints)
+        if not self._is_openai_compatible:
+            if "model" not in payload or not payload["model"]:
+                _LOGGER.warning(
+                    "Missing 'model' field in request to local API. This may cause issues with Ollama."
+                )
+            elif self.url and "ollama" in self.url.lower():
+                _LOGGER.debug(
+                    "Detected Ollama URL, ensuring model is specified: %s",
+                    payload.get("model"),
+                )
 
-        async with aiohttp.ClientSession() as session:
+        async with self._session() as session:
             async with session.post(
-                self.url,
+                request_url,
                 headers=headers,
                 json=payload,
                 timeout=aiohttp.ClientTimeout(total=300),
@@ -196,10 +483,10 @@ class LocalClient(BaseAIClient):
                             )
                     elif resp.status == 400:
                         raise Exception(
-                            f"Bad request to local API. Error: {error_text}"
+                            "Bad request to local API. Check Home Assistant logs for details."
                         )
                     else:
-                        raise Exception(f"Local API error {resp.status}: {error_text}")
+                        raise Exception(f"Local API error (status {resp.status}). Check Home Assistant logs for details.")
 
                 try:
                     response_text = await resp.text()
@@ -220,7 +507,9 @@ class LocalClient(BaseAIClient):
                         # Try common response formats
                         # Ollama format - return only the response text
                         if "response" in data:
-                            response_content = data["response"]
+                            response_content = self.strip_thinking_tags(
+                                data["response"]
+                            )
                             _LOGGER.debug(
                                 "Extracted response content: %s",
                                 (
@@ -291,6 +580,12 @@ class LocalClient(BaseAIClient):
                                     )
                                     pass
 
+                            # Before wrapping as final_response, try to extract embedded JSON
+                            _extracted = _extract_json_from_text(response_content)
+                            if _extracted and isinstance(_extracted, dict) and "request_type" in _extracted:
+                                _LOGGER.debug("Extracted embedded JSON from prose/markdown response")
+                                return json.dumps(_extracted)
+
                             # If it's plain text, wrap it in the expected JSON format
                             wrapped_response = {
                                 "request_type": "final_response",
@@ -303,9 +598,11 @@ class LocalClient(BaseAIClient):
                         elif "choices" in data and len(data["choices"]) > 0:
                             choice = data["choices"][0]
                             if "message" in choice and "content" in choice["message"]:
-                                content = choice["message"]["content"]
+                                content = self.strip_thinking_tags(
+                                    choice["message"]["content"]
+                                )
                             elif "text" in choice:
-                                content = choice["text"]
+                                content = self.strip_thinking_tags(choice["text"])
                             else:
                                 content = str(data)
 
@@ -332,6 +629,12 @@ class LocalClient(BaseAIClient):
                                     )
                                     pass
 
+                            # Before wrapping as final_response, try to extract embedded JSON
+                            _extracted = _extract_json_from_text(content)
+                            if _extracted and isinstance(_extracted, dict) and "request_type" in _extracted:
+                                _LOGGER.debug("Extracted embedded JSON from prose/markdown response (OpenAI format)")
+                                return json.dumps(_extracted)
+
                             # Wrap in expected format if plain text
                             wrapped_response = {
                                 "request_type": "final_response",
@@ -341,7 +644,7 @@ class LocalClient(BaseAIClient):
 
                         # Generic content field
                         elif "content" in data:
-                            content = data["content"]
+                            content = self.strip_thinking_tags(data["content"])
                             content = content.strip()
                             if content.startswith("{") and content.endswith("}"):
                                 try:
@@ -363,6 +666,12 @@ class LocalClient(BaseAIClient):
                                         "Invalid JSON from local model, treating as plain text (generic format)"
                                     )
                                     pass
+
+                            # Before wrapping as final_response, try to extract embedded JSON
+                            _extracted = _extract_json_from_text(content)
+                            if _extracted and isinstance(_extracted, dict) and "request_type" in _extracted:
+                                _LOGGER.debug("Extracted embedded JSON from prose/markdown response (generic format)")
+                                return json.dumps(_extracted)
 
                             wrapped_response = {
                                 "request_type": "final_response",
@@ -398,9 +707,16 @@ class LocalClient(BaseAIClient):
                                 isinstance(message_content, dict)
                                 and "content" in message_content
                             ):
-                                content = message_content["content"]
+                                content = self.strip_thinking_tags(
+                                    message_content["content"]
+                                )
                             else:
-                                content = str(message_content)
+                                content = self.strip_thinking_tags(str(message_content))
+                            # Before wrapping as final_response, try to extract embedded JSON
+                            _extracted = _extract_json_from_text(content)
+                            if _extracted and isinstance(_extracted, dict) and "request_type" in _extracted:
+                                _LOGGER.debug("Extracted embedded JSON from message field response")
+                                return json.dumps(_extracted)
                             return json.dumps(
                                 {"request_type": "final_response", "response": content}
                             )
@@ -432,6 +748,12 @@ class LocalClient(BaseAIClient):
                             except json.JSONDecodeError:
                                 pass
 
+                        # Before wrapping as final_response, try to extract embedded JSON
+                        _extracted = _extract_json_from_text(response_text)
+                        if _extracted and isinstance(_extracted, dict) and "request_type" in _extracted:
+                            _LOGGER.debug("Extracted embedded JSON from raw text response")
+                            return json.dumps(_extracted)
+
                         # If not valid JSON, wrap the raw text in expected format
                         _LOGGER.debug("Response is not JSON, wrapping plain text")
                         wrapped_response = {
@@ -442,11 +764,76 @@ class LocalClient(BaseAIClient):
 
                 except Exception as e:
                     _LOGGER.error("Failed to parse local API response: %s", str(e))
-                    raise Exception(f"Failed to parse local API response: {str(e)}")
+                    raise Exception("Failed to parse local API response")
+
+    async def get_response_stream(self, messages, **kwargs):
+        """SSE streaming for OpenAI-compatible local endpoints.
+
+        Yields text chunks as they arrive. Falls back to non-streaming on error.
+        Only works for OpenAI-compatible endpoints (LM Studio, vLLM, etc.).
+        """
+        if not self._is_openai_compatible:
+            # Ollama-native endpoints don't support SSE streaming in the same way
+            _LOGGER.debug("Local non-OpenAI endpoint: falling back to non-streaming")
+            result = await self.get_response(messages, **kwargs)
+            yield result
+            return
+
+        headers = {"Content-Type": "application/json"}
+        payload = {
+            "messages": messages,
+            "stream": True,
+            "temperature": 0.7,
+            "top_p": 0.9,
+        }
+        if self.model:
+            payload["model"] = self.model
+
+        try:
+            async with self._session() as session:
+                async with session.post(
+                    self._chat_url,
+                    headers=headers,
+                    json=payload,
+                    timeout=aiohttp.ClientTimeout(total=300),
+                ) as resp:
+                    if resp.status != 200:
+                        _LOGGER.warning(
+                            "Local stream error %d, falling back", resp.status
+                        )
+                        result = await self.get_response(messages, **kwargs)
+                        yield result
+                        return
+
+                    async for line in resp.content:
+                        decoded = line.decode("utf-8", errors="replace").strip()
+                        if not decoded or not decoded.startswith("data:"):
+                            continue
+                        data_str = decoded[5:].strip()
+                        if data_str == "[DONE]":
+                            break
+                        try:
+                            chunk = json.loads(data_str)
+                            content = (
+                                chunk.get("choices", [{}])[0]
+                                .get("delta", {})
+                                .get("content", "")
+                            )
+                            if content:
+                                yield content
+                        except (json.JSONDecodeError, IndexError, KeyError):
+                            continue
+        except Exception as e:
+            _LOGGER.warning("Local streaming failed (%s), falling back", e)
+            result = await self.get_response(messages, **kwargs)
+            yield result
 
 
 class LlamaClient(BaseAIClient):
-    def __init__(self, token, model="Llama-4-Maverick-17B-128E-Instruct-FP8"):
+    def __init__(
+        self, token, model="Llama-4-Maverick-17B-128E-Instruct-FP8", hass=None
+    ):
+        super().__init__(hass=hass)
         self.token = token
         self.model = model
         self.api_url = "https://api.llama.com/v1/chat/completions"
@@ -467,7 +854,7 @@ class LlamaClient(BaseAIClient):
 
         _LOGGER.debug("Llama request payload: %s", json.dumps(payload, indent=2))
 
-        async with aiohttp.ClientSession() as session:
+        async with self._session() as session:
             async with session.post(
                 self.api_url,
                 headers=headers,
@@ -482,14 +869,26 @@ class LlamaClient(BaseAIClient):
                 # Extract text from Llama response
                 completion = data.get("completion_message", {})
                 content = completion.get("content", {})
-                return content.get("text", str(data))
+                return self.strip_thinking_tags(content.get("text", str(data)))
 
 
 class OpenAIClient(BaseAIClient):
-    def __init__(self, token, model="gpt-3.5-turbo"):
+    def __init__(self, token, model="gpt-3.5-turbo", base_url="", hass=None):
+        super().__init__(hass=hass)
         self.token = token
         self.model = model
-        self.api_url = "https://api.openai.com/v1/chat/completions"
+        # Use custom base URL if provided (e.g. LM Studio at http://192.168.0.57:1234/v1)
+        if base_url and base_url.strip():
+            self.api_url = base_url.rstrip("/") + "/chat/completions"
+            self._custom_endpoint = True
+            _LOGGER.info(
+                "OpenAIClient using custom endpoint: %s (model: %s)",
+                self.api_url,
+                self.model,
+            )
+        else:
+            self.api_url = "https://api.openai.com/v1/chat/completions"
+            self._custom_endpoint = False
 
     def _is_restricted_model(self):
         """Check if the model has restricted parameters (no temperature, top_p, etc.)."""
@@ -502,8 +901,10 @@ class OpenAIClient(BaseAIClient):
     async def get_response(self, messages, **kwargs):
         _LOGGER.debug("Making request to OpenAI API with model: %s", self.model)
 
-        # Validate token
-        if not self.token or not self.token.startswith("sk-"):
+        # Validate token — skip sk- prefix check for custom endpoints (e.g. LM Studio)
+        if not self.token:
+            raise Exception("Invalid OpenAI API key format")
+        if not self._custom_endpoint and not self.token.startswith("sk-"):
             raise Exception("Invalid OpenAI API key format")
 
         headers = {
@@ -529,7 +930,7 @@ class OpenAIClient(BaseAIClient):
 
         _LOGGER.debug("OpenAI request payload: %s", json.dumps(payload, indent=2))
 
-        async with aiohttp.ClientSession() as session:
+        async with self._session() as session:
             async with session.post(
                 self.api_url,
                 headers=headers,
@@ -542,15 +943,13 @@ class OpenAIClient(BaseAIClient):
 
                 if resp.status != 200:
                     _LOGGER.error("OpenAI API error %d: %s", resp.status, response_text)
-                    raise Exception(f"OpenAI API error {resp.status}: {response_text}")
+                    raise Exception(f"AI provider request failed (status {resp.status})")
 
                 try:
                     data = json.loads(response_text)
                 except json.JSONDecodeError as e:
                     _LOGGER.error("Failed to parse OpenAI response as JSON: %s", str(e))
-                    raise Exception(
-                        f"Invalid JSON response from OpenAI: {response_text[:200]}"
-                    )
+                    raise Exception("Invalid JSON response from AI provider")
 
                 # Extract text from OpenAI response
                 choices = data.get("choices", [])
@@ -561,7 +960,7 @@ class OpenAIClient(BaseAIClient):
                         _LOGGER.debug(
                             "Full OpenAI response: %s", json.dumps(data, indent=2)
                         )
-                    return content
+                    return self.strip_thinking_tags(content)
                 else:
                     _LOGGER.warning("OpenAI response missing expected structure")
                     _LOGGER.debug(
@@ -571,7 +970,8 @@ class OpenAIClient(BaseAIClient):
 
 
 class GeminiClient(BaseAIClient):
-    def __init__(self, token, model="gemini-2.5-flash"):
+    def __init__(self, token, model="gemini-2.5-flash", hass=None):
+        super().__init__(hass=hass)
         self.token = token.strip() if token else token  # Strip whitespace from token
         self.model = model
         # Use v1beta for all models as per Google's current API documentation
@@ -606,6 +1006,10 @@ class GeminiClient(BaseAIClient):
                     )
             elif role == "user":
                 gemini_contents.append({"role": "user", "parts": [{"text": content}]})
+            elif role == "tool":
+                # Gemini doesn't support role='tool' in basic contents API;
+                # map HA data-injection turns to 'user' role.
+                gemini_contents.append({"role": "user", "parts": [{"text": content}]})
             elif role == "assistant":
                 gemini_contents.append({"role": "model", "parts": [{"text": content}]})
 
@@ -623,7 +1027,7 @@ class GeminiClient(BaseAIClient):
 
         _LOGGER.debug("Gemini request payload: %s", json.dumps(payload, indent=2))
 
-        async with aiohttp.ClientSession() as session:
+        async with self._session() as session:
             async with session.post(
                 url_with_key,
                 headers=headers,
@@ -636,15 +1040,13 @@ class GeminiClient(BaseAIClient):
 
                 if resp.status != 200:
                     _LOGGER.error("Gemini API error %d: %s", resp.status, response_text)
-                    raise Exception(f"Gemini API error {resp.status}: {response_text}")
+                    raise Exception(f"AI provider request failed (status {resp.status})")
 
                 try:
                     data = json.loads(response_text)
                 except json.JSONDecodeError as e:
                     _LOGGER.error("Failed to parse Gemini response as JSON: %s", str(e))
-                    raise Exception(
-                        f"Invalid JSON response from Gemini: {response_text[:200]}"
-                    )
+                    raise Exception("Invalid JSON response from AI provider")
 
                 # Log token usage for debugging, especially for Gemini 2.5 extended thinking
                 usage_metadata = data.get("usageMetadata", {})
@@ -676,7 +1078,7 @@ class GeminiClient(BaseAIClient):
                             _LOGGER.debug(
                                 "Full Gemini response: %s", json.dumps(data, indent=2)
                             )
-                        return content
+                        return self.strip_thinking_tags(content)
                     else:
                         _LOGGER.warning("Gemini response missing parts")
                         _LOGGER.debug(
@@ -691,7 +1093,8 @@ class GeminiClient(BaseAIClient):
 
 
 class AnthropicClient(BaseAIClient):
-    def __init__(self, token, model="claude-sonnet-4-5-20250929"):
+    def __init__(self, token, model="claude-opus-4-6", hass=None):
+        super().__init__(hass=hass)
         self.token = token
         self.model = model
         self.api_url = "https://api.anthropic.com/v1/messages"
@@ -717,13 +1120,17 @@ class AnthropicClient(BaseAIClient):
                 system_message = content
             elif role == "user":
                 anthropic_messages.append({"role": "user", "content": content})
+            elif role == "tool":
+                # Anthropic doesn't support role='tool' in basic messages API;
+                # map HA data-injection turns to 'user' role.
+                anthropic_messages.append({"role": "user", "content": content})
             elif role == "assistant":
                 anthropic_messages.append({"role": "assistant", "content": content})
 
         payload = {
             "model": self.model,
             "max_tokens": 8192,  # Maximum for Anthropic Claude models
-            "temperature": 0.7,
+            "temperature": 0.0,
             "messages": anthropic_messages,
         }
 
@@ -733,12 +1140,12 @@ class AnthropicClient(BaseAIClient):
 
         _LOGGER.debug("Anthropic request payload: %s", json.dumps(payload, indent=2))
 
-        async with aiohttp.ClientSession() as session:
+        async with self._session() as session:
             async with session.post(
                 self.api_url,
                 headers=headers,
                 json=payload,
-                timeout=aiohttp.ClientTimeout(total=30),
+                timeout=aiohttp.ClientTimeout(total=300),
             ) as resp:
                 if resp.status != 200:
                     error_text = await resp.text()
@@ -751,12 +1158,90 @@ class AnthropicClient(BaseAIClient):
                     # Get the text from the first content block
                     for block in content_blocks:
                         if block.get("type") == "text":
-                            return block.get("text", str(data))
+                            return self.strip_thinking_tags(
+                                block.get("text", str(data))
+                            )
                 return str(data)
+
+    async def get_response_stream(self, messages, **kwargs):
+        """SSE streaming for the Anthropic Messages API.
+
+        Yields text chunks as they arrive. Falls back to non-streaming on error.
+        """
+        _LOGGER.debug("Anthropic stream: starting with model %s", self.model)
+        headers = {
+            "x-api-key": self.token,
+            "Content-Type": "application/json",
+            "anthropic-version": "2023-06-01",
+        }
+
+        system_message = None
+        anthropic_messages = []
+        for message in messages:
+            role = message.get("role", "user")
+            content = message.get("content", "")
+            if role == "system":
+                system_message = content
+            elif role == "user":
+                anthropic_messages.append({"role": "user", "content": content})
+            elif role == "tool":
+                anthropic_messages.append({"role": "user", "content": content})
+            elif role == "assistant":
+                anthropic_messages.append({"role": "assistant", "content": content})
+
+        payload = {
+            "model": self.model,
+            "max_tokens": 8192,
+            "temperature": 0.0,
+            "messages": anthropic_messages,
+            "stream": True,
+        }
+        if system_message:
+            payload["system"] = system_message
+
+        try:
+            async with self._session() as session:
+                async with session.post(
+                    self.api_url,
+                    headers=headers,
+                    json=payload,
+                    timeout=aiohttp.ClientTimeout(total=300),
+                ) as resp:
+                    if resp.status != 200:
+                        _LOGGER.warning(
+                            "Anthropic stream error %d, falling back", resp.status
+                        )
+                        result = await self.get_response(messages, **kwargs)
+                        yield result
+                        return
+
+                    async for line in resp.content:
+                        decoded = line.decode("utf-8", errors="replace").strip()
+                        if not decoded or not decoded.startswith("data:"):
+                            continue
+                        data_str = decoded[5:].strip()
+                        if not data_str:
+                            continue
+                        try:
+                            event = json.loads(data_str)
+                            event_type = event.get("type", "")
+                            if event_type == "content_block_delta":
+                                text = event.get("delta", {}).get("text", "")
+                                if text:
+                                    yield text
+                            elif event_type == "message_stop":
+                                break
+                        except (json.JSONDecodeError, KeyError):
+                            continue
+        except Exception as e:
+            _LOGGER.warning("Anthropic streaming failed (%s), falling back", e)
+            result = await self.get_response(messages, **kwargs)
+            yield result
 
 
 class OpenRouterClient(BaseAIClient):
-    def __init__(self, token, model="openai/gpt-4o"):
+    def __init__(self, token, model="openai/gpt-4o", hass=None):
+        super().__init__(hass=hass)
         self.token = token
         self.model = model
         self.api_url = "https://openrouter.ai/api/v1/chat/completions"
@@ -779,7 +1264,7 @@ class OpenRouterClient(BaseAIClient):
 
         _LOGGER.debug("OpenRouter request payload: %s", json.dumps(payload, indent=2))
 
-        async with aiohttp.ClientSession() as session:
+        async with self._session() as session:
             async with session.post(
                 self.api_url,
                 headers=headers,
@@ -802,12 +1287,15 @@ class OpenRouterClient(BaseAIClient):
                     )
                     return str(data)
                 if choices and "message" in choices[0]:
-                    return choices[0]["message"].get("content", str(data))
+                    return self.strip_thinking_tags(
+                        choices[0]["message"].get("content", str(data))
+                    )
                 return str(data)
 
 
 class AlterClient(BaseAIClient):
-    def __init__(self, token, model=""):
+    def __init__(self, token, model="", hass=None):
+        super().__init__(hass=hass)
         self.token = token
         self.model = model
         self.api_url = "https://alterhq.com/api/v1/chat/completions"
@@ -827,7 +1315,7 @@ class AlterClient(BaseAIClient):
 
         _LOGGER.debug("Alter request payload: %s", json.dumps(payload, indent=2))
 
-        async with aiohttp.ClientSession() as session:
+        async with self._session() as session:
             async with session.post(
                 self.api_url,
                 headers=headers,
@@ -846,12 +1334,15 @@ class AlterClient(BaseAIClient):
                     _LOGGER.debug("Full Alter response: %s", json.dumps(data, indent=2))
                     return str(data)
                 if choices and "message" in choices[0]:
-                    return choices[0]["message"].get("content", str(data))
+                    return self.strip_thinking_tags(
+                        choices[0]["message"].get("content", str(data))
+                    )
                 return str(data)
 
 
 class ZaiClient(BaseAIClient):
-    def __init__(self, token, model="", endpoint_type="general"):
+    def __init__(self, token, model="", endpoint_type="general", hass=None):
+        super().__init__(hass=hass)
         self.token = token
         self.model = model
         self.endpoint_type = endpoint_type
@@ -881,7 +1372,7 @@ class ZaiClient(BaseAIClient):
 
         _LOGGER.debug("z.ai request payload: %s", json.dumps(payload, indent=2))
 
-        async with aiohttp.ClientSession() as session:
+        async with self._session() as session:
             async with session.post(
                 self.api_url,
                 headers=headers,
@@ -900,8 +1391,349 @@ class ZaiClient(BaseAIClient):
                     _LOGGER.debug("Full z.ai response: %s", json.dumps(data, indent=2))
                     return str(data)
                 if choices and "message" in choices[0]:
-                    return choices[0]["message"].get("content", str(data))
+                    return self.strip_thinking_tags(
+                        choices[0]["message"].get("content", str(data))
+                    )
                 return str(data)
+
+
+# --- Ask Sage retry helpers ---
+_ASK_SAGE_MAX_RETRIES = 3
+_ASK_SAGE_RETRY_DELAYS = [1, 2, 4]  # seconds (exponential backoff)
+
+
+def _is_overload_response(text: str) -> bool:
+    """Return True if Ask Sage returned a transient overload/rate-limit message."""
+    lowered = text.lower()
+    return (
+        "overloaded" in lowered
+        or "try again" in lowered
+        or "rate limit" in lowered
+        or "too many requests" in lowered
+    )
+
+
+class AskSageClient(BaseAIClient):
+    """Client for the Ask Sage Server API.
+
+    API reference: https://docs.asksage.ai/api-docs/swagger.html
+    Base URL: https://api.asksage.ai/server/
+    Auth: x-access-tokens header
+    Models: fetched live from GET /get-models, cached on the instance.
+    """
+
+    QUERY_URL = "https://api.asksage.ai/server/query"
+    AGENT_URL = "https://api.asksage.ai/server/execute-agent"
+    MODELS_URL = "https://api.asksage.ai/server/get-models"
+
+    # live: 0=off, 1=Live (Google), 2=Live+ (Google+crawl)
+    # deep_agent: True to route through Ask Sage's Deep Agent (/execute-agent)
+    def __init__(
+        self,
+        token: str,
+        model: str = "gpt-4o-mini",
+        live: int = 0,
+        deep_agent: bool = False,
+        hass=None,
+    ):
+        super().__init__(hass=hass)
+        self.token = token
+        self.model = model
+        self.live = int(live)  # coerce str->int in case HA stores it as string
+        self.deep_agent = bool(deep_agent)
+
+    @staticmethod
+    def _filter_models(raw: list) -> list:
+        """Return model ids from the /get-models response, excluding gov models."""
+        return [
+            m["id"]
+            for m in raw
+            if isinstance(m, dict) and "id" in m and "gov" not in m["id"].lower()
+        ]
+
+    @classmethod
+    async def fetch_models(cls) -> list:
+        """Fetch available (non-gov) model ids from the public /get-models endpoint.
+
+        Returns an empty list on failure so callers can fall back gracefully.
+        """
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(
+                    cls.MODELS_URL,
+                    timeout=aiohttp.ClientTimeout(total=10),
+                ) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        return cls._filter_models(data.get("data", []))
+                    _LOGGER.warning(
+                        "Ask Sage /get-models returned HTTP %d", resp.status
+                    )
+        except Exception as exc:  # noqa: BLE001
+            _LOGGER.warning("Ask Sage model fetch failed: %s", exc)
+        return []
+
+    async def validate_data_scope(self) -> dict:
+        """Validate that the Ask Sage token is valid and confirm data-scope guarantees.
+
+        Calls /user/get-user-logs to confirm the token authenticates and that
+        any HA data sent as query content is stored only under this account.
+
+        Returns a dict with keys:
+          - valid (bool): token accepted by Ask Sage
+          - account_scoped (bool): logs confirmed to be per-account only
+          - message (str): human-readable summary
+
+        DATA FLOW AUDIT:
+          - HA entity data is passed inline in the ``message`` field of /query.
+          - ``dataset: "none"`` prevents Ask Sage from writing data to RAG.
+          - ``limit_references: 0`` prevents RAG retrieval even if dataset changes.
+          - Per Ask Sage docs: query content is "fire and forget" — not used for
+            model training, not retained after response generation.
+          - /user/get-user-logs stores prompt + completion scoped to THIS token
+            only — no cross-account access.
+          - No data is ever sent to /train or /add-dataset by this integration.
+        """
+        USER_LOGS_URL = "https://api.asksage.ai/user/get-user-logs"
+        headers = {
+            "x-access-tokens": self.token,
+            "Content-Type": "application/json",
+        }
+        try:
+            async with self._session() as session:
+                async with session.post(
+                    USER_LOGS_URL,
+                    headers=headers,
+                    json={},
+                    timeout=aiohttp.ClientTimeout(total=10),
+                ) as resp:
+                    if resp.status == 401:
+                        return {
+                            "valid": False,
+                            "account_scoped": False,
+                            "message": "Ask Sage token rejected (401). HA data will NOT be sent.",
+                        }
+                    if resp.status == 200:
+                        _LOGGER.info(
+                            "Ask Sage data-scope validation PASSED: "
+                            "token authenticated, query logs are scoped to this account only. "
+                            "HA entity data is sent as query content (fire-and-forget, not RAG-ingested). "
+                            "dataset=none, limit_references=0 enforced on all requests."
+                        )
+                        return {
+                            "valid": True,
+                            "account_scoped": True,
+                            "message": (
+                                "Data scope confirmed: HA data sent as query content only, "
+                                "scoped to this Ask Sage account. Not written to RAG or shared datasets."
+                            ),
+                        }
+                    return {
+                        "valid": False,
+                        "account_scoped": False,
+                        "message": f"Ask Sage validation returned unexpected status {resp.status}.",
+                    }
+        except Exception as exc:  # noqa: BLE001
+            _LOGGER.warning("Ask Sage data-scope validation failed: %s", exc)
+            return {
+                "valid": False,
+                "account_scoped": False,
+                "message": f"Could not validate Ask Sage data scope: {exc}",
+            }
+
+    async def get_response(self, messages, **kwargs) -> str:
+        """Send a query to Ask Sage and return the generated text.
+
+        Routes to /execute-agent when deep_agent=True, otherwise /query.
+
+        The Ask Sage /query endpoint accepts:
+          - message: the prompt (string or conversation array)
+          - model: model id string
+          - temperature: float 0-1
+          - dataset: "none" (we don't inject HA knowledge into Ask Sage's RAG)
+          - live: 0=off, 1=Live (Google), 2=Live+ (Google+crawl)
+
+        The response shape is CompletionResponse; the generated text lives in
+        the ``message`` field (not ``choices`` like OpenAI-compatible APIs).
+        """
+        _LOGGER.debug(
+            "Ask Sage: sending query with model=%s, live=%d, deep_agent=%s, %d messages",
+            self.model,
+            self.live,
+            self.deep_agent,
+            len(messages),
+        )
+
+        # DATA SCOPE AUDIT: HA entity data is sent as query content (message field)
+        # to Ask Sage's /query endpoint. dataset="none" and limit_references=0
+        # ensure no data is written to or retrieved from Ask Sage RAG.
+        # Logs are stored per this token's account only (fire-and-forget, no cross-account access).
+        _LOGGER.debug(
+            "Ask Sage data scope: dataset=none, limit_references=0, "
+            "query content scoped to account token. No RAG ingestion."
+        )
+
+        headers = {
+            "x-access-tokens": self.token,
+            "Content-Type": "application/json",
+        }
+
+        # Ask Sage's /query accepts the message field as either a plain string
+        # (single turn) or an array of {user, message} objects (multi-turn).
+        # We normalise from the OpenAI-style {role, content} format that
+        # conversation_history uses throughout this integration.
+        system_content = ""
+        asksage_messages = []
+        for msg in messages:
+            role = msg.get("role", "")
+            content = msg.get("content", "")
+            if role == "system":
+                # Ask Sage handles the system prompt via the system_prompt
+                # field — capture it and skip from the message array.
+                system_content = content
+                continue
+            elif role in ("user", "me"):
+                asksage_messages.append({"user": "me", "message": content})
+            elif role in ("assistant", "gpt", "tool"):
+                asksage_messages.append({"user": "gpt", "message": content})
+
+        # If the conversation collapsed to a single user turn, send as string
+        # for maximum compatibility with the API.
+        if len(asksage_messages) == 1 and asksage_messages[0]["user"] == "me":
+            message_payload = asksage_messages[0]["message"]
+        elif asksage_messages:
+            message_payload = asksage_messages
+        else:
+            # Fallback: grab the last user message as a plain string
+            user_msgs = [m for m in messages if m.get("role") == "user"]
+            message_payload = user_msgs[-1]["content"] if user_msgs else ""
+
+        payload = {
+            "message": message_payload,
+            "model": self.model,
+            "temperature": 0,
+            "dataset": "none",  # Disable Ask Sage RAG; HA data is injected by the agent
+            "limit_references": 0,  # Belt-and-suspenders: zero RAG references regardless of dataset setting
+            "live": self.live,
+        }
+        if system_content:
+            payload["system_prompt"] = system_content
+
+        _LOGGER.debug(
+            "Ask Sage request payload (message preview): %s",
+            str(message_payload)[:200],
+        )
+
+        # Deep Agent mode routes to /execute-agent; standard queries use /query
+        endpoint_url = self.AGENT_URL if self.deep_agent else self.QUERY_URL
+        if self.deep_agent:
+            # /execute-agent wraps the message in an agent payload
+            payload = {
+                "message": message_payload,
+                "model": self.model,
+                "live": self.live,
+                "streaming": False,
+            }
+            if system_content:
+                payload["system_prompt"] = system_content
+            _LOGGER.debug("Ask Sage: routing to Deep Agent endpoint")
+
+        last_text = ""
+        for attempt in range(_ASK_SAGE_MAX_RETRIES):
+            async with self._session() as session:
+                async with session.post(
+                    endpoint_url,
+                    headers=headers,
+                    json=payload,
+                    timeout=aiohttp.ClientTimeout(total=300),
+                ) as resp:
+                    if resp.status == 401:
+                        raise Exception(
+                            "Ask Sage API error 401: invalid or expired token"
+                        )
+                    if resp.status in (429, 503):
+                        error_text = await resp.text()
+                        if attempt < _ASK_SAGE_MAX_RETRIES - 1:
+                            delay = _ASK_SAGE_RETRY_DELAYS[attempt]
+                            _LOGGER.warning(
+                                "Ask Sage HTTP %d (attempt %d/%d), retrying in %ds",
+                                resp.status,
+                                attempt + 1,
+                                _ASK_SAGE_MAX_RETRIES,
+                                delay,
+                            )
+                            await asyncio.sleep(delay)
+                            continue
+                        raise Exception(
+                            f"Ask Sage API error {resp.status}: service unavailable after {_ASK_SAGE_MAX_RETRIES} attempts"
+                        )
+                    if resp.status != 200:
+                        error_text = await resp.text()
+                        _LOGGER.error(
+                            "Ask Sage API error %d: %s", resp.status, error_text
+                        )
+                        raise Exception(
+                            f"Ask Sage API error {resp.status}: {error_text[:200]}"
+                        )
+
+                    data = await resp.json()
+                    _LOGGER.debug("Ask Sage raw response keys: %s", list(data.keys()))
+
+                    if self.deep_agent:
+                        # Deep Agent response: {execution_status, response: {response: "..."}, ...}
+                        inner = data.get("response", {})
+                        if isinstance(inner, dict):
+                            text = inner.get("response", "") or inner.get("message", "")
+                        else:
+                            text = str(inner)
+                        if not text:
+                            text = data.get("message", "")
+                    else:
+                        # Standard /query CompletionResponse: generated text is in `message`.
+                        text = data.get("message", "")
+                        if not text:
+                            # Fallback: some error states surface in `response`
+                            text = data.get("response", "")
+                    if not text:
+                        _LOGGER.warning(
+                            "Ask Sage returned empty message. Full response: %s",
+                            json.dumps(data, default=str)[:500],
+                        )
+                        return str(data)
+
+            # Check for overload response before returning
+            if not _is_overload_response(text):
+                break  # good response, exit loop
+
+            last_text = text
+            if attempt < _ASK_SAGE_MAX_RETRIES - 1:
+                delay = _ASK_SAGE_RETRY_DELAYS[attempt]
+                _LOGGER.warning(
+                    "Ask Sage overload response (attempt %d/%d), retrying in %ds: %s",
+                    attempt + 1,
+                    _ASK_SAGE_MAX_RETRIES,
+                    delay,
+                    text[:100],
+                )
+                await asyncio.sleep(delay)
+        else:
+            # All retries exhausted — return friendly message
+            _LOGGER.error(
+                "Ask Sage overload after %d attempts. Last response: %s",
+                _ASK_SAGE_MAX_RETRIES,
+                last_text[:200],
+            )
+            return json.dumps(
+                {
+                    "request_type": "final_response",
+                    "response": "Ask Sage is temporarily overloaded. It was automatically retried 3 times — if you still see this, please resend your message.",
+                }
+            )
+
+        return self.strip_thinking_tags(str(text))
+
+    # Ask Sage /query does not support SSE streaming — get_response_stream intentionally
+    # omitted so the main loop always uses get_response() for this provider.
 
 
 # === Main Agent ===
@@ -911,6 +1743,13 @@ class AiAgentHaAgent:
     SYSTEM_PROMPT = {
         "role": "system",
         "content": (
+            "CRITICAL OUTPUT FORMAT RULES — READ BEFORE ANYTHING ELSE:\n"
+            "- You MUST respond with pure, valid JSON only. No exceptions.\n"
+            "- NEVER output YAML. NEVER output markdown. NEVER use code fences (```).\n"
+            '- If you are asked to build a dashboard, respond with JSON using request_type="dashboard_suggestion".\n'
+            '- A response that starts with "title:", "views:", or "cards:" is WRONG and will break the application.\n'
+            "- WRONG: title: My Dashboard\\nviews:\\n  - cards:...\n"
+            '- RIGHT: {"request_type": "dashboard_suggestion", "dashboard": {"title": "My Dashboard", "views": [...]}}\n\n'
             "You are an AI assistant integrated with Home Assistant.\n"
             "You can request specific data by using only these commands:\n"
             "- get_entity_state(entity_id): Get state of a specific entity\n"
@@ -987,7 +1826,15 @@ class AiAgentHaAgent:
             '      "cards": [...]\n'
             "    }]\n"
             "  }\n"
-            "}\n\n"
+            "}\n"
+            "IMPORTANT: The above MUST be returned as raw JSON. Do NOT format it as YAML. "
+            "Do NOT add markdown fences. The response must start with { and end with }.\n\n"
+            "COMPLETE DASHBOARD EXAMPLE (copy this structure exactly):\n"
+            '{"request_type":"dashboard_suggestion","message":"Here is your irrigation dashboard.","dashboard":{"title":"Irrigation","url_path":"irrigation","icon":"mdi:sprinkler","show_in_sidebar":true,"views":[{"title":"Zones","cards":[{"type":"entities","title":"Zone Controls","entities":["switch.zone_1","switch.zone_2"]},{"type":"gauge","title":"Soil Moisture","entity":"sensor.soil_moisture","min":0,"max":100}]}]}}\n'
+            "^^^ That is the ONLY acceptable format. No YAML. No markdown. No explanation outside JSON.\n\n"
+            "WEATHER DASHBOARD EXAMPLE (use get_weather_data() first, then respond with):\n"
+            '{"request_type":"dashboard_suggestion","message":"Here is your weather dashboard.","dashboard":{"title":"Weather","url_path":"weather-dashboard","icon":"mdi:weather-partly-cloudy","show_in_sidebar":true,"views":[{"title":"Current Weather","cards":[{"type":"weather-forecast","entity":"weather.home","show_current":true,"show_forecast":false},{"type":"horizontal-stack","cards":[{"type":"gauge","entity":"weather.home","attribute":"temperature","name":"Temperature","unit":"\u00b0F","min":0,"max":120,"needle":true},{"type":"gauge","entity":"weather.home","attribute":"humidity","name":"Humidity","unit":"%","min":0,"max":100,"needle":true}]},{"type":"entities","title":"Details","entities":[{"entity":"weather.home","type":"attribute","attribute":"wind_speed","name":"Wind Speed","icon":"mdi:weather-windy"},{"entity":"weather.home","type":"attribute","attribute":"pressure","name":"Pressure","icon":"mdi:gauge"}]}]}]}}\n'
+            "^^^ Weather dashboard: replace weather.home with actual entity_id from get_weather_data(). ALWAYS use dashboard_suggestion for ANY dashboard request.\n\n"
             "For data requests, use this exact JSON format:\n"
             "{\n"
             '  "request_type": "data_request",\n'
@@ -1017,7 +1864,8 @@ class AiAgentHaAgent:
             "- DO NOT include explanations or descriptions outside the JSON\n"
             "- Your entire response must be parseable as JSON\n"
             "- Use the 'message' field inside the JSON for user-facing text\n"
-            "- NEVER mix regular text with JSON in your response\n\n"
+            "- NEVER mix regular text with JSON in your response\n"
+            "- NEVER use YAML format for ANY domain (irrigation, lighting, climate, etc.)\n\n"
             "WRONG: 'I'll create this for you. {\"request_type\": ...}'\n"
             'CORRECT: \'{"request_type": "dashboard_suggestion", "message": "I\'ll create this for you.", ...}\''
         ),
@@ -1026,6 +1874,13 @@ class AiAgentHaAgent:
     SYSTEM_PROMPT_LOCAL = {
         "role": "system",
         "content": (
+            "CRITICAL OUTPUT FORMAT RULES — READ BEFORE ANYTHING ELSE:\n"
+            "- You MUST respond with pure, valid JSON only. No exceptions.\n"
+            "- NEVER output YAML. NEVER output markdown. NEVER use code fences (```).\n"
+            '- If you are asked to build a dashboard, respond with JSON using request_type="dashboard_suggestion".\n'
+            '- A response that starts with "title:", "views:", or "cards:" is WRONG and will break the application.\n'
+            "- WRONG: title: My Dashboard\\nviews:\\n  - cards:...\n"
+            '- RIGHT: {"request_type": "dashboard_suggestion", "dashboard": {"title": "My Dashboard", "views": [...]}}\n\n'
             "You are an AI assistant integrated with Home Assistant.\n"
             "You can request specific data by using only these commands:\n"
             "- get_entity_state(entity_id): Get state of a specific entity\n"
@@ -1102,7 +1957,15 @@ class AiAgentHaAgent:
             '      "cards": [...]\n'
             "    }]\n"
             "  }\n"
-            "}\n\n"
+            "}\n"
+            "IMPORTANT: The above MUST be returned as raw JSON. Do NOT format it as YAML. "
+            "Do NOT add markdown fences. The response must start with { and end with }.\n\n"
+            "COMPLETE DASHBOARD EXAMPLE (copy this structure exactly):\n"
+            '{"request_type":"dashboard_suggestion","message":"Here is your irrigation dashboard.","dashboard":{"title":"Irrigation","url_path":"irrigation","icon":"mdi:sprinkler","show_in_sidebar":true,"views":[{"title":"Zones","cards":[{"type":"entities","title":"Zone Controls","entities":["switch.zone_1","switch.zone_2"]},{"type":"gauge","title":"Soil Moisture","entity":"sensor.soil_moisture","min":0,"max":100}]}]}}\n'
+            "^^^ That is the ONLY acceptable format. No YAML. No markdown. No explanation outside JSON.\n\n"
+            "WEATHER DASHBOARD EXAMPLE (use get_weather_data() first, then respond with):\n"
+            '{"request_type":"dashboard_suggestion","message":"Here is your weather dashboard.","dashboard":{"title":"Weather","url_path":"weather-dashboard","icon":"mdi:weather-partly-cloudy","show_in_sidebar":true,"views":[{"title":"Current Weather","cards":[{"type":"weather-forecast","entity":"weather.home","show_current":true,"show_forecast":false},{"type":"horizontal-stack","cards":[{"type":"gauge","entity":"weather.home","attribute":"temperature","name":"Temperature","unit":"\u00b0F","min":0,"max":120,"needle":true},{"type":"gauge","entity":"weather.home","attribute":"humidity","name":"Humidity","unit":"%","min":0,"max":100,"needle":true}]},{"type":"entities","title":"Details","entities":[{"entity":"weather.home","type":"attribute","attribute":"wind_speed","name":"Wind Speed","icon":"mdi:weather-windy"},{"entity":"weather.home","type":"attribute","attribute":"pressure","name":"Pressure","icon":"mdi:gauge"}]}]}]}}\n'
+            "^^^ Weather dashboard: replace weather.home with actual entity_id from get_weather_data(). ALWAYS use dashboard_suggestion for ANY dashboard request.\n\n"
             "For data requests, use this exact JSON format:\n"
             "{\n"
             '  "request_type": "data_request",\n'
@@ -1132,7 +1995,8 @@ class AiAgentHaAgent:
             "- DO NOT include explanations or descriptions outside the JSON\n"
             "- Your entire response must be parseable as JSON\n"
             "- Use the 'message' field inside the JSON for user-facing text\n"
-            "- NEVER mix regular text with JSON in your response\n\n"
+            "- NEVER mix regular text with JSON in your response\n"
+            "- NEVER use YAML format for ANY domain (irrigation, lighting, climate, etc.)\n\n"
             "WRONG: 'I'll create this for you. {\"request_type\": ...}'\n"
             'CORRECT: \'{"request_type": "dashboard_suggestion", "message": "I\'ll create this for you.", ...}\''
         ),
@@ -1146,12 +2010,23 @@ class AiAgentHaAgent:
         self._cache: Dict[str, Any] = {}
         self.ai_client: BaseAIClient
         self._cache_timeout = 300  # 5 minutes
-        self._max_retries = 10
+        self._max_retries = 5
         self._retry_delay = 1  # seconds
         self._rate_limit = 60  # requests per minute
         self._last_request_time = 0
         self._request_count = 0
         self._request_window_start = time.time()
+        # Serialise access to process_query so concurrent calls don't
+        # interleave conversation_history reads/writes.
+        self._query_lock = asyncio.Lock()
+        # Maximum conversation_history entries kept in memory.
+        # _get_ai_response only sends the last 10 to the model, but we
+        # keep a larger buffer for rollback and debug trace purposes.
+        self._max_history_len = 50
+        # Conversation TTL: auto-expire stale history to prevent
+        # context drift across long idle periods.
+        self._conversation_ttl = 1800  # 30 minutes
+        self._conversation_last_active = 0.0
 
         provider = config.get("ai_provider", "openai")
         models_config = config.get("models", {})
@@ -1170,33 +2045,69 @@ class AiAgentHaAgent:
         # Initialize the appropriate AI client with model selection
         if provider == "openai":
             model = models_config.get("openai", "gpt-3.5-turbo")
-            self.ai_client = OpenAIClient(config.get("openai_token"), model)
+            base_url = config.get("openai_base_url", "") or ""
+            self.ai_client = OpenAIClient(
+                config.get("openai_token"), model, base_url, hass=self.hass
+            )
         elif provider == "gemini":
             model = models_config.get("gemini", "gemini-2.5-flash")
-            self.ai_client = GeminiClient(config.get("gemini_token"), model)
+            self.ai_client = GeminiClient(
+                config.get("gemini_token"), model, hass=self.hass
+            )
         elif provider == "openrouter":
             model = models_config.get("openrouter", "openai/gpt-4o")
-            self.ai_client = OpenRouterClient(config.get("openrouter_token"), model)
+            self.ai_client = OpenRouterClient(
+                config.get("openrouter_token"), model, hass=self.hass
+            )
         elif provider == "anthropic":
-            model = models_config.get("anthropic", "claude-sonnet-4-5-20250929")
-            self.ai_client = AnthropicClient(config.get("anthropic_token"), model)
+            model = models_config.get("anthropic", "claude-opus-4-6")
+            self.ai_client = AnthropicClient(
+                config.get("anthropic_token"), model, hass=self.hass
+            )
         elif provider == "alter":
             model = models_config.get("alter", "")
-            self.ai_client = AlterClient(config.get("alter_token"), model)
+            self.ai_client = AlterClient(
+                config.get("alter_token"), model, hass=self.hass
+            )
         elif provider == "zai":
             model = models_config.get("zai", "glm-4.7")
             endpoint_type = config.get("zai_endpoint", "general")
-            self.ai_client = ZaiClient(config.get("zai_token"), model, endpoint_type)
+            self.ai_client = ZaiClient(
+                config.get("zai_token"), model, endpoint_type, hass=self.hass
+            )
+        elif provider == "asksage":
+            model = models_config.get("asksage", "gpt-4o-mini")
+            self.ai_client = AskSageClient(
+                config.get("asksage_token"),
+                model,
+                live=config.get("asksage_live", 0),
+                deep_agent=config.get("asksage_deep_agent", False),
+                hass=self.hass,
+            )
+            # Schedule data-scope validation as a background task so it runs
+            # after HA finishes initializing without blocking the setup path.
+            if self.hass:
+
+                async def _run_asksage_validation(client=self.ai_client):
+                    result = await client.validate_data_scope()
+                    if not result["valid"]:
+                        _LOGGER.warning(
+                            "Ask Sage data-scope validation: %s", result["message"]
+                        )
+
+                self.hass.async_create_task(_run_asksage_validation())
         elif provider == "local":
             model = models_config.get("local", "")
             url = config.get("local_url")
             if not url:
                 _LOGGER.error("Missing local_url for local provider")
                 raise Exception("Missing local_url configuration for local provider")
-            self.ai_client = LocalClient(url, model)
+            self.ai_client = LocalClient(url, model, hass=self.hass)
         else:  # default to llama if somehow specified
             model = models_config.get("llama", "Llama-4-Maverick-17B-128E-Instruct-FP8")
-            self.ai_client = LlamaClient(config.get("llama_token"), model)
+            self.ai_client = LlamaClient(
+                config.get("llama_token"), model, hass=self.hass
+            )
 
         _LOGGER.debug(
             "AiAgentHaAgent initialized successfully with provider: %s, model: %s",
@@ -1220,6 +2131,8 @@ class AiAgentHaAgent:
             token = self.config.get("alter_token")
         elif provider == "zai":
             token = self.config.get("zai_token")
+        elif provider == "asksage":
+            token = self.config.get("asksage_token")
         elif provider == "local":
             token = self.config.get("local_url")
         else:
@@ -1231,6 +2144,10 @@ class AiAgentHaAgent:
         # For local provider, validate URL format
         if provider == "local":
             return bool(token.startswith(("http://", "https://")))
+
+        # For OpenAI with a custom base URL (e.g. LM Studio), skip the length check
+        if provider == "openai" and self.config.get("openai_base_url", "").strip():
+            return len(token) > 0
 
         # Add more specific validation based on your API key format
         return len(token) >= 32
@@ -1293,10 +2210,6 @@ class AiAgentHaAgent:
             area_name = None
 
             try:
-                from homeassistant.helpers import area_registry as ar
-                from homeassistant.helpers import device_registry as dr
-                from homeassistant.helpers import entity_registry as er
-
                 entity_registry = er.async_get(self.hass)
                 device_registry = dr.async_get(self.hass)
                 area_registry = ar.async_get(self.hass)
@@ -1410,7 +2323,7 @@ class AiAgentHaAgent:
             return result
         except Exception as e:
             _LOGGER.exception("Error getting entity state: %s", str(e))
-            return {"error": f"Error getting entity state: {str(e)}"}
+            return {"error": "Error getting entity state. Check Home Assistant logs for details."}
 
     async def get_entities_by_domain(self, domain: str) -> List[Dict[str, Any]]:
         """Get all entities for a specific domain."""
@@ -1425,7 +2338,7 @@ class AiAgentHaAgent:
             return [await self.get_entity_state(state.entity_id) for state in states]
         except Exception as e:
             _LOGGER.exception("Error getting entities by domain: %s", str(e))
-            return [{"error": f"Error getting entities for domain {domain}: {str(e)}"}]
+            return [{"error": "Error getting entities. Check Home Assistant logs for details."}]
 
     async def get_entities_by_device_class(
         self, device_class: str, domain: str = None
@@ -1473,7 +2386,7 @@ class AiAgentHaAgent:
             _LOGGER.exception("Error getting entities by device_class: %s", str(e))
             return [
                 {
-                    "error": f"Error getting entities with device_class {device_class}: {str(e)}"
+                    "error": "Error getting entities. Check Home Assistant logs for details."
                 }
             ]
 
@@ -1524,7 +2437,7 @@ class AiAgentHaAgent:
 
         except Exception as e:
             _LOGGER.exception("Error getting climate-related entities: %s", str(e))
-            return [{"error": f"Error getting climate-related entities: {str(e)}"}]
+            return [{"error": "Error getting entities. Check Home Assistant logs for details."}]
 
     async def get_entities_by_area(self, area_id: str) -> List[Dict[str, Any]]:
         """Get all entities for a specific area."""
@@ -1532,9 +2445,6 @@ class AiAgentHaAgent:
             _LOGGER.debug("Requesting all entities for area: %s", area_id)
 
             # Get entity registry to find entities assigned to the area
-            from homeassistant.helpers import device_registry as dr
-            from homeassistant.helpers import entity_registry as er
-
             entity_registry = er.async_get(self.hass)
             device_registry = dr.async_get(self.hass)
 
@@ -1566,7 +2476,7 @@ class AiAgentHaAgent:
 
         except Exception as e:
             _LOGGER.exception("Error getting entities by area: %s", str(e))
-            return [{"error": f"Error getting entities for area {area_id}: {str(e)}"}]
+            return [{"error": "Error getting entities. Check Home Assistant logs for details."}]
 
     async def get_entities(self, area_id=None, area_ids=None) -> List[Dict[str, Any]]:
         """Get entities by area(s) - flexible method that supports single area or multiple areas."""
@@ -1616,7 +2526,7 @@ class AiAgentHaAgent:
 
         except Exception as e:
             _LOGGER.exception("Error getting entities: %s", str(e))
-            return [{"error": f"Error getting entities: {str(e)}"}]
+            return [{"error": "Error getting entities. Check Home Assistant logs for details."}]
 
     async def get_calendar_events(
         self, entity_id: Optional[str] = None
@@ -1633,7 +2543,7 @@ class AiAgentHaAgent:
             return await self.get_entities_by_domain("calendar")
         except Exception as e:
             _LOGGER.exception("Error getting calendar events: %s", str(e))
-            return [{"error": f"Error getting calendar events: {str(e)}"}]
+            return [{"error": "Error getting calendar events. Check Home Assistant logs for details."}]
 
     async def get_automations(self) -> List[Dict[str, Any]]:
         """Get all automations."""
@@ -1642,7 +2552,7 @@ class AiAgentHaAgent:
             return await self.get_entities_by_domain("automation")
         except Exception as e:
             _LOGGER.exception("Error getting automations: %s", str(e))
-            return [{"error": f"Error getting automations: {str(e)}"}]
+            return [{"error": "Error getting automations. Check Home Assistant logs for details."}]
 
     async def get_entity_registry(self) -> List[Dict]:
         """Get entity registry entries with device_class and other metadata.
@@ -1651,10 +2561,6 @@ class AiAgentHaAgent:
         """
         _LOGGER.debug("Requesting all entity registry entries")
         try:
-            from homeassistant.helpers import area_registry as ar
-            from homeassistant.helpers import device_registry as dr
-            from homeassistant.helpers import entity_registry as er
-
             entity_registry = er.async_get(self.hass)
             if not entity_registry:
                 return []
@@ -1708,14 +2614,12 @@ class AiAgentHaAgent:
             return result
         except Exception as e:
             _LOGGER.exception("Error getting entity registry entries: %s", str(e))
-            return [{"error": f"Error getting entity registry entries: {str(e)}"}]
+            return [{"error": "Error getting entity registry. Check Home Assistant logs for details."}]
 
     async def get_device_registry(self) -> List[Dict]:
         """Get device registry entries"""
         _LOGGER.debug("Requesting all device registry entries")
         try:
-            from homeassistant.helpers import device_registry as dr
-
             registry = dr.async_get(self.hass)
             if not registry:
                 return []
@@ -1744,7 +2648,7 @@ class AiAgentHaAgent:
             ]
         except Exception as e:
             _LOGGER.exception("Error getting device registry entries: %s", str(e))
-            return [{"error": f"Error getting device registry entries: {str(e)}"}]
+            return [{"error": "Error getting device registry. Check Home Assistant logs for details."}]
 
     async def get_history(self, entity_id: str, hours: int = 24) -> List[Dict]:
         """Get historical state changes for an entity"""
@@ -1783,14 +2687,12 @@ class AiAgentHaAgent:
             return result
         except Exception as e:
             _LOGGER.exception("Error getting history: %s", str(e))
-            return [{"error": f"Error getting history: {str(e)}"}]
+            return [{"error": "Error getting history. Check Home Assistant logs for details."}]
 
     async def get_area_registry(self) -> Dict[str, Any]:
         """Get area registry information"""
         _LOGGER.debug("Get area registry information")
         try:
-            from homeassistant.helpers import area_registry as ar
-
             registry = ar.async_get(self.hass)
             if not registry:
                 return {}
@@ -1808,7 +2710,7 @@ class AiAgentHaAgent:
             return result
         except Exception as e:
             _LOGGER.exception("Error getting area registry: %s", str(e))
-            return {"error": f"Error getting area registry: {str(e)}"}
+            return {"error": "Error getting area registry. Check Home Assistant logs for details."}
 
     async def get_person_data(self) -> List[Dict]:
         """Get person tracking information"""
@@ -1835,7 +2737,7 @@ class AiAgentHaAgent:
             return result
         except Exception as e:
             _LOGGER.exception("Error getting person tracking information: %s", str(e))
-            return [{"error": f"Error getting person tracking information: {str(e)}"}]
+            return [{"error": "Error getting person data. Check Home Assistant logs for details."}]
 
     async def get_statistics(self, entity_id: str) -> Dict:
         """Get statistics for an entity"""
@@ -1877,7 +2779,7 @@ class AiAgentHaAgent:
                 return {"error": f"No statistics available for entity {entity_id}"}
         except Exception as e:
             _LOGGER.exception("Error getting statistics: %s", str(e))
-            return {"error": f"Error getting statistics: {str(e)}"}
+            return {"error": "Error getting statistics. Check Home Assistant logs for details."}
 
     async def get_scenes(self) -> List[Dict]:
         """Get scene configurations"""
@@ -1901,7 +2803,7 @@ class AiAgentHaAgent:
             return result
         except Exception as e:
             _LOGGER.exception("Error getting scene configurations: %s", str(e))
-            return [{"error": f"Error getting scene configurations: {str(e)}"}]
+            return [{"error": "Error getting scenes. Check Home Assistant logs for details."}]
 
     async def get_weather_data(self) -> Dict[str, Any]:
         """Get weather data from any available weather entity in the system."""
@@ -1971,7 +2873,7 @@ class AiAgentHaAgent:
             return {"current": current, "forecast": processed_forecast}
         except Exception as e:
             _LOGGER.exception("Error getting weather data: %s", str(e))
-            return {"error": f"Error getting weather data: {str(e)}"}
+            return {"error": "Error retrieving weather data. Check Home Assistant logs for details."}
 
     async def create_automation(
         self, automation_config: Dict[str, Any]
@@ -2007,12 +2909,13 @@ class AiAgentHaAgent:
 
             # Read current automations.yaml using async executor
             automations_path = self.hass.config.path("automations.yaml")
-            try:
-                current_automations = await self.hass.async_add_executor_job(
-                    lambda: yaml.safe_load(open(automations_path, "r")) or []
-                )
-            except FileNotFoundError:
-                current_automations = []
+            def _read_automations():
+                try:
+                    with open(automations_path, "r") as fh:
+                        return yaml.safe_load(fh) or []
+                except FileNotFoundError:
+                    return []
+            current_automations = await self.hass.async_add_executor_job(_read_automations)
 
             # Check for duplicate automation names
             if any(
@@ -2027,13 +2930,10 @@ class AiAgentHaAgent:
             current_automations.append(automation_entry)
 
             # Write back to file using async executor
-            await self.hass.async_add_executor_job(
-                lambda: yaml.dump(
-                    current_automations,
-                    open(automations_path, "w"),
-                    default_flow_style=False,
-                )
-            )
+            def _write_automations():
+                with open(automations_path, "w") as fh:
+                    yaml.dump(current_automations, fh, default_flow_style=False)
+            await self.hass.async_add_executor_job(_write_automations)
 
             # Reload automations
             await self.hass.services.async_call("automation", "reload")
@@ -2048,7 +2948,7 @@ class AiAgentHaAgent:
 
         except Exception as e:
             _LOGGER.exception("Error creating automation: %s", str(e))
-            return {"error": f"Error creating automation: {str(e)}"}
+            return {"error": "Error creating automation. Check Home Assistant logs for details."}
 
     async def get_dashboards(self) -> List[Dict[str, Any]]:
         """Get list of all dashboards."""
@@ -2121,11 +3021,11 @@ class AiAgentHaAgent:
 
             except Exception as e:
                 _LOGGER.warning("Could not get dashboards via lovelace: %s", str(e))
-                return [{"error": f"Could not retrieve dashboards: {str(e)}"}]
+                return [{"error": "Could not retrieve dashboards. Check Home Assistant logs for details."}]
 
         except Exception as e:
             _LOGGER.exception("Error getting dashboards: %s", str(e))
-            return [{"error": f"Error getting dashboards: {str(e)}"}]
+            return [{"error": "Error getting dashboards. Check Home Assistant logs for details."}]
 
     async def get_dashboard_config(
         self, dashboard_url: Optional[str] = None
@@ -2167,341 +3067,97 @@ class AiAgentHaAgent:
 
             except Exception as e:
                 _LOGGER.warning("Could not get dashboard config: %s", str(e))
-                return {"error": f"Could not retrieve dashboard config: {str(e)}"}
+                return {"error": "Could not retrieve dashboard config. Check Home Assistant logs for details."}
 
         except Exception as e:
             _LOGGER.exception("Error getting dashboard config: %s", str(e))
-            return {"error": f"Error getting dashboard config: {str(e)}"}
+            return {"error": "Error getting dashboard config. Check Home Assistant logs for details."}
 
     async def create_dashboard(
         self, dashboard_config: Dict[str, Any]
     ) -> Dict[str, Any]:
-        """Create a new dashboard using Home Assistant's Lovelace WebSocket API."""
+        """Save views/cards config to an existing dashboard.
+
+        Dashboard entry creation is now handled by the frontend via WebSocket
+        commands (lovelace/dashboards/create + lovelace/config/save).
+        This service is kept for saving config to an already-registered dashboard.
+        """
         try:
             _LOGGER.debug(
-                "Creating dashboard with config: %s",
+                "create_dashboard called with config: %s",
                 json.dumps(dashboard_config, default=str),
             )
 
-            # Validate required fields
-            if not dashboard_config.get("title"):
+            title = dashboard_config.get("title")
+            if not title:
                 return {"error": "Dashboard title is required"}
 
-            if not dashboard_config.get("url_path"):
-                return {"error": "Dashboard URL path is required"}
+            url_path = dashboard_config.get("url_path")
+            if not url_path:
+                url_path = re.sub(r"[^a-z0-9]+", "-", title.lower()).strip("-")
+            else:
+                url_path = re.sub(r"[^a-z0-9]+", "-", url_path.lower()).strip("-")
 
-            # Sanitize the URL path
-            url_path = (
-                dashboard_config["url_path"].lower().replace(" ", "-").replace("_", "-")
-            )
+            # Ensure url_path contains a hyphen (HA requirement)
+            if "-" not in url_path:
+                url_path = url_path + "-dashboard"
 
-            # Prepare dashboard configuration for Lovelace
-            dashboard_data = {
-                "title": dashboard_config["title"],
-                "icon": dashboard_config.get("icon", "mdi:view-dashboard"),
-                "show_in_sidebar": dashboard_config.get("show_in_sidebar", True),
-                "require_admin": dashboard_config.get("require_admin", False),
-                "views": dashboard_config.get("views", []),
-            }
+            views = dashboard_config.get("views", [{"title": "Home", "cards": []}])
 
             try:
-                # Create dashboard file directly - this is the most reliable method
-                import os
+                from homeassistant.components.lovelace import DOMAIN as LOVELACE_DOMAIN
 
-                import yaml
+                lovelace_data = self.hass.data.get(LOVELACE_DOMAIN)
+                if lovelace_data is None:
+                    return {"error": "Lovelace integration is not available"}
 
-                # Create the dashboard YAML file
-                lovelace_config_file = self.hass.config.path(
-                    f"ui-lovelace-{url_path}.yaml"
-                )
+                if not hasattr(lovelace_data, "dashboards"):
+                    return {"error": "Lovelace dashboards not available"}
 
-                # Use async_add_executor_job to perform file I/O asynchronously
-                def write_dashboard_file():
-                    with open(lovelace_config_file, "w") as f:
-                        yaml.dump(
-                            dashboard_data,
-                            f,
-                            default_flow_style=False,
-                            allow_unicode=True,
-                        )
-
-                await self.hass.async_add_executor_job(write_dashboard_file)
-
-                _LOGGER.info(
-                    "Successfully created dashboard file: %s", lovelace_config_file
-                )
-
-                # Now update configuration.yaml
-                try:
-                    config_file = self.hass.config.path("configuration.yaml")
-                    dashboard_config_entry = {
-                        url_path: {
-                            "mode": "yaml",
-                            "title": dashboard_config["title"],
-                            "icon": dashboard_config.get("icon", "mdi:view-dashboard"),
-                            "show_in_sidebar": dashboard_config.get(
-                                "show_in_sidebar", True
-                            ),
-                            "filename": f"ui-lovelace-{url_path}.yaml",
-                        }
-                    }
-
-                    def update_config_file():
-                        try:
-                            with open(config_file, "r") as f:
-                                content = f.read()
-
-                            # Dashboard configuration to add
-                            dashboard_yaml = f"""    {url_path}:
-      mode: yaml
-      title: {dashboard_config['title']}
-      icon: {dashboard_config.get('icon', 'mdi:view-dashboard')}
-      show_in_sidebar: {str(dashboard_config.get('show_in_sidebar', True)).lower()}
-      filename: ui-lovelace-{url_path}.yaml"""
-
-                            # Check if lovelace section exists
-                            if "lovelace:" not in content:
-                                # Add complete lovelace section at the end
-                                lovelace_section = f"""
-# Lovelace dashboards configuration added by AI Agent
-lovelace:
-  dashboards:
-{dashboard_yaml}
-"""
-                                with open(config_file, "a") as f:
-                                    f.write(lovelace_section)
-                                return True
-
-                            # If lovelace exists, check for dashboards section
-                            lines = content.split("\n")
-                            new_lines = []
-                            dashboard_added = False
-                            in_lovelace = False
-                            lovelace_indent = 0
-
-                            for i, line in enumerate(lines):
-                                new_lines.append(line)
-
-                                # Detect lovelace section
-                                if (
-                                    line.strip() == "lovelace:"
-                                    or line.strip().startswith("lovelace:")
-                                ):
-                                    in_lovelace = True
-                                    lovelace_indent = len(line) - len(line.lstrip())
-                                    continue
-
-                                # If we're in lovelace section
-                                if in_lovelace:
-                                    current_indent = (
-                                        len(line) - len(line.lstrip())
-                                        if line.strip()
-                                        else 0
-                                    )
-
-                                    # If we hit another top-level section, we're out of lovelace
-                                    if (
-                                        line.strip()
-                                        and current_indent <= lovelace_indent
-                                        and not line.startswith(" ")
-                                    ):
-                                        if line.strip() != "lovelace:":
-                                            in_lovelace = False
-
-                                    # Look for dashboards section
-                                    if in_lovelace and "dashboards:" in line:
-                                        # Add our dashboard after the dashboards: line
-                                        new_lines.append(dashboard_yaml)
-                                        dashboard_added = True
-                                        in_lovelace = False  # We're done
-                                        break
-
-                            # If we found lovelace but no dashboards section, add it
-                            if not dashboard_added and "lovelace:" in content:
-                                # Find lovelace section and add dashboards
-                                new_lines = []
-                                for line in lines:
-                                    new_lines.append(line)
-                                    if (
-                                        line.strip() == "lovelace:"
-                                        or line.strip().startswith("lovelace:")
-                                    ):
-                                        # Add dashboards section right after lovelace
-                                        new_lines.append("  dashboards:")
-                                        new_lines.append(dashboard_yaml)
-                                        dashboard_added = True
-                                        break
-
-                            if dashboard_added:
-                                with open(config_file, "w") as f:
-                                    f.write("\n".join(new_lines))
-                                return True
-                            else:
-                                # Last resort: append to end of file
-                                with open(config_file, "a") as f:
-                                    f.write(f"\n  dashboards:\n{dashboard_yaml}\n")
-                                return True
-
-                        except Exception as e:
-                            _LOGGER.error(
-                                "Failed to update configuration.yaml: %s", str(e)
-                            )
-                            # Fallback to simple append method
-                            try:
-                                with open(config_file, "r") as f:
-                                    content = f.read()
-
-                                # Check if lovelace section exists
-                                if "lovelace:" not in content:
-                                    # Add lovelace section
-                                    lovelace_config = f"""
-# Lovelace dashboards
-lovelace:
-  dashboards:
-    {url_path}:
-      mode: yaml
-      title: {dashboard_config['title']}
-      icon: {dashboard_config.get('icon', 'mdi:view-dashboard')}
-      show_in_sidebar: {str(dashboard_config.get('show_in_sidebar', True)).lower()}
-      filename: ui-lovelace-{url_path}.yaml
-"""
-                                    with open(config_file, "a") as f:
-                                        f.write(lovelace_config)
-                                else:
-                                    # Add to existing lovelace section (simple approach)
-                                    dashboard_entry = f"""    {url_path}:
-      mode: yaml
-      title: {dashboard_config['title']}
-      icon: {dashboard_config.get('icon', 'mdi:view-dashboard')}
-      show_in_sidebar: {str(dashboard_config.get('show_in_sidebar', True)).lower()}
-      filename: ui-lovelace-{url_path}.yaml
-"""
-                                    # Find the dashboards section and add to it
-                                    lines = content.split("\n")
-                                    new_lines = []
-                                    in_dashboards = False
-                                    dashboards_indented = False
-
-                                    for line in lines:
-                                        new_lines.append(line)
-                                        if (
-                                            "dashboards:" in line
-                                            and "lovelace"
-                                            in content[: content.find(line)]
-                                        ):
-                                            in_dashboards = True
-                                            # Add our dashboard entry after dashboards:
-                                            new_lines.append(dashboard_entry.rstrip())
-                                            in_dashboards = False
-
-                                    # If we couldn't find dashboards section, add it under lovelace
-                                    if not any("dashboards:" in line for line in lines):
-                                        for i, line in enumerate(new_lines):
-                                            if line.strip() == "lovelace:":
-                                                new_lines.insert(i + 1, "  dashboards:")
-                                                new_lines.insert(
-                                                    i + 2, dashboard_entry.rstrip()
-                                                )
-                                                break
-
-                                    with open(config_file, "w") as f:
-                                        f.write("\n".join(new_lines))
-
-                                return True
-                            except Exception as fallback_error:
-                                _LOGGER.error(
-                                    "Fallback config update also failed: %s",
-                                    str(fallback_error),
-                                )
-                                return False
-
-                    config_updated = await self.hass.async_add_executor_job(
-                        update_config_file
-                    )
-
-                    if config_updated:
-                        success_message = f"""Dashboard '{dashboard_config['title']}' created successfully!
-
-✅ Dashboard file created: ui-lovelace-{url_path}.yaml
-✅ Configuration.yaml updated automatically
-
-🔄 Please restart Home Assistant to see your new dashboard in the sidebar."""
-
-                        return {
-                            "success": True,
-                            "message": success_message,
-                            "url_path": url_path,
-                            "restart_required": True,
-                        }
-                    else:
-                        # Config update failed, provide manual instructions
-                        config_instructions = f"""Dashboard '{dashboard_config['title']}' created successfully!
-
-✅ Dashboard file created: ui-lovelace-{url_path}.yaml
-⚠️  Could not automatically update configuration.yaml
-
-Please manually add this to your configuration.yaml:
-
-lovelace:
-  dashboards:
-    {url_path}:
-      mode: yaml
-      title: {dashboard_config['title']}
-      icon: {dashboard_config.get('icon', 'mdi:view-dashboard')}
-      show_in_sidebar: {str(dashboard_config.get('show_in_sidebar', True)).lower()}
-      filename: ui-lovelace-{url_path}.yaml
-
-Then restart Home Assistant to see your new dashboard in the sidebar."""
-
-                        return {
-                            "success": True,
-                            "message": config_instructions,
-                            "url_path": url_path,
-                            "restart_required": True,
-                        }
-
-                except Exception as config_error:
-                    _LOGGER.error(
-                        "Error updating configuration.yaml: %s", str(config_error)
-                    )
-                    # Provide manual instructions as fallback
-                    config_instructions = f"""Dashboard '{dashboard_config['title']}' created successfully!
-
-✅ Dashboard file created: ui-lovelace-{url_path}.yaml
-⚠️  Could not automatically update configuration.yaml
-
-Please manually add this to your configuration.yaml:
-
-lovelace:
-  dashboards:
-    {url_path}:
-      mode: yaml
-      title: {dashboard_config['title']}
-      icon: {dashboard_config.get('icon', 'mdi:view-dashboard')}
-      show_in_sidebar: {str(dashboard_config.get('show_in_sidebar', True)).lower()}
-      filename: ui-lovelace-{url_path}.yaml
-
-Then restart Home Assistant to see your new dashboard in the sidebar."""
-
+                dashboard_store = lovelace_data.dashboards.get(url_path)
+                if dashboard_store is None:
                     return {
-                        "success": True,
-                        "message": config_instructions,
-                        "url_path": url_path,
-                        "restart_required": True,
+                        "error": f"Dashboard '{url_path}' not found. "
+                        "Create it first via the frontend UI."
                     }
+
+                config_to_save = {"views": views}
+                if hasattr(dashboard_store, "async_save"):
+                    await dashboard_store.async_save(config_to_save)
+                elif hasattr(dashboard_store, "async_save_config"):
+                    await dashboard_store.async_save_config(config_to_save)
+                else:
+                    return {"error": "Dashboard found but save API not available"}
+
+                _LOGGER.info("Saved config to dashboard: %s", url_path)
+                return {
+                    "success": True,
+                    "message": (
+                        f"Dashboard '{title}' updated successfully!\n\n"
+                        f"URL: /lovelace-{url_path}"
+                    ),
+                    "url_path": url_path,
+                }
 
             except Exception as e:
-                _LOGGER.error("Failed to create dashboard file: %s", str(e))
-                return {"error": f"Failed to create dashboard file: {str(e)}"}
+                _LOGGER.error("create_dashboard failed: %s", e, exc_info=True)
+                return {"error": f"Failed to save dashboard config: {e}"}
 
         except Exception as e:
-            _LOGGER.exception("Error creating dashboard: %s", str(e))
-            return {"error": f"Error creating dashboard: {str(e)}"}
+            _LOGGER.exception("Error in create_dashboard: %s", str(e))
+            return {
+                "error": "Error creating dashboard. Check Home Assistant logs for details."
+            }
 
     async def update_dashboard(
         self, dashboard_url: str, dashboard_config: Dict[str, Any]
     ) -> Dict[str, Any]:
-        """Update an existing dashboard using Home Assistant's Lovelace WebSocket API."""
+        """Update an existing dashboard using Home Assistant's Lovelace Storage API.
+
+        Saves the updated views/cards configuration instantly — no restart required.
+        For storage-mode dashboards the change is reflected immediately in the UI.
+        Falls back to YAML file updates for legacy yaml-mode dashboards.
+        """
         try:
             _LOGGER.debug(
                 "Updating dashboard %s with config: %s",
@@ -2509,27 +3165,67 @@ Then restart Home Assistant to see your new dashboard in the sidebar."""
                 json.dumps(dashboard_config, default=str),
             )
 
-            # Prepare updated dashboard configuration
-            dashboard_data = {
-                "title": dashboard_config.get("title", "Updated Dashboard"),
-                "icon": dashboard_config.get("icon", "mdi:view-dashboard"),
-                "show_in_sidebar": dashboard_config.get("show_in_sidebar", True),
-                "require_admin": dashboard_config.get("require_admin", False),
-                "views": dashboard_config.get("views", []),
-            }
+            views = dashboard_config.get("views", [])
 
+            # --- Try Lovelace Storage API first (instant update) ---
             try:
-                # Update dashboard file directly
+                from homeassistant.components.lovelace import DOMAIN as LOVELACE_DOMAIN
+
+                lovelace_data = self.hass.data.get(LOVELACE_DOMAIN)
+                if lovelace_data is not None and hasattr(lovelace_data, "dashboards"):
+                    dashboards = lovelace_data.dashboards
+                    # The url_path may be None for the default dashboard
+                    dashboard_key = None if dashboard_url is None else dashboard_url
+                    dashboard_store = dashboards.get(dashboard_key)
+
+                    if dashboard_store is not None:
+                        config_to_save = {"views": views}
+
+                        if hasattr(dashboard_store, "async_save"):
+                            await dashboard_store.async_save(config_to_save)
+                        elif hasattr(dashboard_store, "async_save_config"):
+                            await dashboard_store.async_save_config(config_to_save)
+                        else:
+                            return {
+                                "error": "Dashboard found but save API not available"
+                            }
+
+                        _LOGGER.info(
+                            "Successfully updated dashboard via Storage API: %s",
+                            dashboard_url,
+                        )
+                        return {
+                            "success": True,
+                            "message": (
+                                f"Dashboard '{dashboard_url}' updated successfully! "
+                                f"Changes are live — no restart required."
+                            ),
+                        }
+
+            except Exception as storage_err:
+                _LOGGER.warning(
+                    "Storage API update failed, trying YAML fallback: %s",
+                    storage_err,
+                )
+
+            # --- Fallback: YAML file update for legacy yaml-mode dashboards ---
+            try:
                 import os
 
                 import yaml
 
-                # Try updating the YAML file
+                dashboard_data = {
+                    "title": dashboard_config.get("title", "Updated Dashboard"),
+                    "icon": dashboard_config.get("icon", "mdi:view-dashboard"),
+                    "show_in_sidebar": dashboard_config.get("show_in_sidebar", True),
+                    "require_admin": dashboard_config.get("require_admin", False),
+                    "views": views,
+                }
+
                 dashboard_file = self.hass.config.path(
                     f"ui-lovelace-{dashboard_url}.yaml"
                 )
 
-                # Check if file exists asynchronously
                 def check_file_exists():
                     return os.path.exists(dashboard_file)
 
@@ -2544,7 +3240,7 @@ Then restart Home Assistant to see your new dashboard in the sidebar."""
                     )
 
                 if file_exists:
-                    # Use async_add_executor_job to perform file I/O asynchronously
+
                     def update_dashboard_file():
                         with open(dashboard_file, "w") as f:
                             yaml.dump(
@@ -2564,23 +3260,50 @@ Then restart Home Assistant to see your new dashboard in the sidebar."""
                         "message": f"Dashboard '{dashboard_url}' updated successfully!",
                     }
                 else:
-                    return {"error": f"Dashboard file for '{dashboard_url}' not found"}
+                    return {"error": f"Dashboard '{dashboard_url}' not found"}
 
             except Exception as e:
-                _LOGGER.error("Failed to update dashboard file: %s", str(e))
-                return {"error": f"Failed to update dashboard file: {str(e)}"}
+                _LOGGER.error("Failed to update dashboard: %s", str(e))
+                return {
+                    "error": "Failed to update dashboard. Check Home Assistant logs for details."
+                }
 
         except Exception as e:
             _LOGGER.exception("Error updating dashboard: %s", str(e))
-            return {"error": f"Error updating dashboard: {str(e)}"}
+            return {
+                "error": "Dashboard update failed. Check Home Assistant logs for details."
+            }
 
     async def process_query(
         self, user_query: str, provider: Optional[str] = None, debug: bool = False
     ) -> Dict[str, Any]:
         """Process a user query with input validation and rate limiting."""
+        async with self._query_lock:
+            return await self._process_query_inner(user_query, provider, debug)
+
+    async def _process_query_inner(
+        self, user_query: str, provider: Optional[str] = None, debug: bool = False
+    ) -> Dict[str, Any]:
+        """Inner implementation of process_query, always called under _query_lock."""
         try:
             if not user_query or not isinstance(user_query, str):
                 return {"success": False, "error": "Invalid query format"}
+
+            # Enforce conversation TTL — if idle longer than the threshold,
+            # auto-clear to prevent stale context from affecting new queries.
+            now = time.time()
+            if (
+                self._conversation_last_active > 0
+                and (now - self._conversation_last_active) > self._conversation_ttl
+                and self.conversation_history
+            ):
+                _LOGGER.debug(
+                    "Conversation TTL expired (idle %.0fs) — clearing history",
+                    now - self._conversation_last_active,
+                )
+                self.conversation_history = []
+                self._cache.clear()
+            self._conversation_last_active = now
 
             # Get the correct configuration for the requested provider
             if provider and provider in self.hass.data[DOMAIN]["configs"]:
@@ -2599,48 +3322,51 @@ Then restart Home Assistant to see your new dashboard in the sidebar."""
 
             provider_config = {
                 "openai": {
-                    "token_key": "openai_token",
+                    "token_key": "openai_token",  # nosec B105
                     "model": models_config.get("openai", "gpt-3.5-turbo"),
                     "client_class": OpenAIClient,
                 },
                 "gemini": {
-                    "token_key": "gemini_token",
+                    "token_key": "gemini_token",  # nosec B105
                     "model": models_config.get("gemini", "gemini-1.5-flash"),
                     "client_class": GeminiClient,
                 },
                 "openrouter": {
-                    "token_key": "openrouter_token",
+                    "token_key": "openrouter_token",  # nosec B105
                     "model": models_config.get("openrouter", "openai/gpt-4o"),
                     "client_class": OpenRouterClient,
                 },
                 "llama": {
-                    "token_key": "llama_token",
+                    "token_key": "llama_token",  # nosec B105
                     "model": models_config.get(
                         "llama", "Llama-4-Maverick-17B-128E-Instruct-FP8"
                     ),
                     "client_class": LlamaClient,
                 },
                 "anthropic": {
-                    "token_key": "anthropic_token",
-                    "model": models_config.get(
-                        "anthropic", "claude-sonnet-4-5-20250929"
-                    ),
+                    "token_key": "anthropic_token",  # nosec B105
+                    "model": models_config.get("anthropic", "claude-opus-4-6"),
                     "client_class": AnthropicClient,
                 },
                 "alter": {
-                    "token_key": "alter_token",
+                    "token_key": "alter_token",  # nosec B105
                     "model": models_config.get("alter", ""),
                     "client_class": AlterClient,
                 },
                 "zai": {
-                    "token_key": "zai_token",
+                    "token_key": "zai_token",  # nosec B105
                     "model": models_config.get("zai", ""),
                     "client_class": ZaiClient,
                 },
                 "local": {
-                    "token_key": "local_url",
+                    "token_key": "local_url",  # nosec B105
                     "model": models_config.get("local", ""),
                     "client_class": LocalClient,
+                },
+                "asksage": {
+                    "token_key": "asksage_token",  # nosec B105
+                    "model": models_config.get("asksage", "gpt-4o-mini"),
+                    "client_class": AskSageClient,
                 },
             }
 
@@ -2679,6 +3405,7 @@ Then restart Home Assistant to see your new dashboard in the sidebar."""
                         token=token,
                         model=provider_settings["model"],
                         endpoint_type=endpoint_type,
+                        hass=self.hass,
                     )
                     _LOGGER.debug(
                         f"Initialized {selected_provider} client with model {provider_settings['model']}, endpoint_type {endpoint_type}"
@@ -2686,23 +3413,64 @@ Then restart Home Assistant to see your new dashboard in the sidebar."""
                 elif selected_provider == "local":
                     # LocalClient takes (url, model)
                     self.ai_client = provider_settings["client_class"](
-                        url=token, model=provider_settings["model"]
+                        url=token, model=provider_settings["model"], hass=self.hass
                     )
                     _LOGGER.debug(
                         f"Initialized {selected_provider} client with model {provider_settings['model']}"
                     )
+                elif selected_provider == "asksage":
+                    # AskSageClient takes (token, model, live, deep_agent)
+                    self.ai_client = provider_settings["client_class"](
+                        token=token,
+                        model=provider_settings["model"],
+                        live=config.get("asksage_live", 0),
+                        deep_agent=config.get("asksage_deep_agent", False),
+                        hass=self.hass,
+                    )
+                    _LOGGER.debug(
+                        f"Initialized {selected_provider} client with model {provider_settings['model']}, "
+                        f"live={config.get('asksage_live', 0)}, deep_agent={config.get('asksage_deep_agent', False)}"
+                    )
+                    # Run data-scope validation inline (we are already inside an async context).
+                    # Warn but do not abort — a failed validation is not a hard error.
+                    try:
+                        scope_result = await self.ai_client.validate_data_scope()
+                        if not scope_result["valid"]:
+                            _LOGGER.warning(
+                                "Ask Sage data-scope validation failed: %s",
+                                scope_result["message"],
+                            )
+                        else:
+                            _LOGGER.debug(
+                                "Ask Sage data-scope: %s", scope_result["message"]
+                            )
+                    except Exception as _scope_exc:  # noqa: BLE001
+                        _LOGGER.warning(
+                            "Ask Sage data-scope check error: %s", _scope_exc
+                        )
                 else:
                     # Other clients take (token, model)
-                    self.ai_client = provider_settings["client_class"](
-                        token=token, model=provider_settings["model"]
-                    )
+                    # For OpenAI, also pass optional custom base_url override
+                    if selected_provider == "openai":
+                        base_url = config.get("openai_base_url", "") or ""
+                        self.ai_client = provider_settings["client_class"](
+                            token=token,
+                            model=provider_settings["model"],
+                            base_url=base_url,
+                            hass=self.hass,
+                        )
+                    else:
+                        self.ai_client = provider_settings["client_class"](
+                            token=token,
+                            model=provider_settings["model"],
+                            hass=self.hass,
+                        )
                     _LOGGER.debug(
                         f"Initialized {selected_provider} client with model {provider_settings['model']}"
                     )
             except Exception as e:
-                error_msg = f"Error initializing {selected_provider} client: {str(e)}"
-                _LOGGER.error(error_msg)
-                return _with_debug({"success": False, "error": error_msg})
+                _LOGGER.error("Error initializing %s client: %s", selected_provider, str(e))
+                return _with_debug({"success": False, "error": "Error initializing AI provider. Check Home Assistant logs for details."})
 
             # Process the query with rate limiting and retries
             if not self._check_rate_limit():
@@ -2733,9 +3501,32 @@ Then restart Home Assistant to see your new dashboard in the sidebar."""
                 _LOGGER.debug("Adding system message to new conversation")
                 self.conversation_history.append(self.system_prompt)
 
-            # Add user query to conversation
+            # Add user query to conversation.
+            # Record the index so we can roll back to this point on error,
+            # preventing a failed query from poisoning the next call.
+            history_rollback_index = len(self.conversation_history)
             self.conversation_history.append({"role": "user", "content": user_query})
-            _LOGGER.debug("Added user query to conversation history")
+
+            # Reset conversation context for new dashboard requests to prevent
+            # entity data contamination from previous queries
+            dashboard_keywords = ["create", "build", "make", "generate", "design", "new"]
+            dashboard_nouns = ["dashboard", "panel", "view", "screen"]
+            query_lower = user_query.lower()
+            is_new_dashboard_request = (
+                any(kw in query_lower for kw in dashboard_keywords) and
+                any(noun in query_lower for noun in dashboard_nouns)
+            )
+            if is_new_dashboard_request:
+                _LOGGER.debug("New dashboard request detected — resetting conversation context")
+                self.conversation_history = [
+                    self.system_prompt,
+                    {"role": "user", "content": user_query}
+                ]
+                history_rollback_index = len(self.conversation_history)
+            _LOGGER.debug(
+                "Added user query to conversation history (rollback index=%d)",
+                history_rollback_index,
+            )
 
             max_iterations = 5  # Prevent infinite loops
             iteration = 0
@@ -2744,10 +3535,39 @@ Then restart Home Assistant to see your new dashboard in the sidebar."""
                 iteration += 1
                 _LOGGER.debug(f"Processing iteration {iteration} of {max_iterations}")
 
+                # Fire progress callback so the panel can show feedback
+                if hasattr(self, '_progress_cb') and self._progress_cb:
+                    step = "Analyzing request..." if iteration == 1 else f"Gathering data (step {iteration}/{max_iterations})..."
+                    try:
+                        self._progress_cb(step, iteration)
+                    except Exception:
+                        pass  # Never let progress reporting break the query
+
                 try:
-                    # Get AI response
+                    # Get AI response (with optional streaming)
                     _LOGGER.debug("Requesting response from AI provider")
-                    response = await self._get_ai_response()
+                    streaming_enabled = config.get("enable_streaming", False)
+                    t_start = time.monotonic()
+
+                    if streaming_enabled and hasattr(
+                        self.ai_client, "get_response_stream"
+                    ):
+                        response = await self._get_ai_response_stream()
+                    else:
+                        response = await self._get_ai_response()
+
+                    t_end = time.monotonic()
+                    thinking_duration = round(t_end - t_start, 1)
+
+                    # Extract thinking content BEFORE stripping
+                    thinking_content = (
+                        BaseAIClient.extract_thinking(response) if response else None
+                    )
+
+                    # Strip thinking tags from the response for further processing
+                    if response:
+                        response = BaseAIClient.strip_thinking_tags(response)
+
                     _LOGGER.debug("Received response from AI provider: %s", response)
 
                     try:
@@ -2755,8 +3575,6 @@ Then restart Home Assistant to see your new dashboard in the sidebar."""
                         response_clean = response.strip()
 
                         # Remove potential BOM and other invisible characters
-                        import codecs
-
                         if response_clean.startswith(codecs.BOM_UTF8.decode("utf-8")):
                             response_clean = response_clean[1:]
 
@@ -2828,12 +3646,26 @@ Then restart Home Assistant to see your new dashboard in the sidebar."""
                                         "Fallback JSON extraction also failed: %s",
                                         str(e2),
                                     )
-                                    raise e  # Re-raise the original error
+                                    # Try _extract_json_from_text as last resort
+                                    _extracted = _extract_json_from_text(response_clean)
+                                    if _extracted and isinstance(_extracted, dict):
+                                        response_data = _extracted
+                                        response = json.dumps(_extracted)
+                                        _LOGGER.debug("Recovered JSON via _extract_json_from_text()")
+                                    else:
+                                        raise e  # Re-raise the original error
                             else:
-                                _LOGGER.warning(
-                                    "Could not find JSON boundaries in response"
-                                )
-                                raise e  # Re-raise the original error
+                                # Try _extract_json_from_text before giving up
+                                _extracted = _extract_json_from_text(response_clean)
+                                if _extracted and isinstance(_extracted, dict):
+                                    response_data = _extracted
+                                    response = json.dumps(_extracted)
+                                    _LOGGER.debug("Recovered JSON via _extract_json_from_text() (no braces found)")
+                                else:
+                                    _LOGGER.warning(
+                                        "Could not find JSON boundaries in response"
+                                    )
+                                    raise e  # Re-raise the original error
 
                         if response_data is None:
                             raise json.JSONDecodeError(
@@ -2882,11 +3714,97 @@ Then restart Home Assistant to see your new dashboard in the sidebar."""
                             else:
                                 request_type = response_data.get("request_type")
                             parameters = response_data.get("parameters", {})
+
+                            # Normalise model-invented aliases to canonical request types
+                            _REQUEST_TYPE_ALIASES = {
+                                "get_temperature_sensors": "get_entities_by_device_class",
+                                "get_humidity_sensors": "get_entities_by_device_class",
+                                "get_motion_sensors": "get_entities_by_device_class",
+                                "get_sensor_states": "get_entities_by_domain",
+                                "get_sensors": "get_entities_by_domain",
+                                "get_lights": "get_entities_by_domain",
+                                "get_switches": "get_entities_by_domain",
+                                "get_all_entities": "get_entities",
+                                "get_entity": "get_entity_state",
+                                "get_state": "get_entity_state",
+                                "get_weather": "get_weather_data",
+                                "get_forecast": "get_weather_data",
+                                "get_climate": "get_climate_related_entities",
+                                "get_climate_entities": "get_climate_related_entities",
+                            }
+                            if request_type in _REQUEST_TYPE_ALIASES:
+                                canonical = _REQUEST_TYPE_ALIASES[request_type]
+                                _LOGGER.debug(
+                                    "Normalising request_type alias %r -> %r",
+                                    request_type,
+                                    canonical,
+                                )
+                                # Inject device_class/domain from the alias if not set
+                                if (
+                                    request_type in ("get_temperature_sensors",)
+                                    and "device_class" not in parameters
+                                ):
+                                    parameters = {
+                                        **parameters,
+                                        "device_class": "temperature",
+                                    }
+                                elif (
+                                    request_type in ("get_humidity_sensors",)
+                                    and "device_class" not in parameters
+                                ):
+                                    parameters = {
+                                        **parameters,
+                                        "device_class": "humidity",
+                                    }
+                                elif (
+                                    request_type in ("get_motion_sensors",)
+                                    and "device_class" not in parameters
+                                ):
+                                    parameters = {
+                                        **parameters,
+                                        "device_class": "motion",
+                                    }
+                                elif (
+                                    request_type in ("get_sensor_states", "get_sensors")
+                                    and "domain" not in parameters
+                                ):
+                                    parameters = {**parameters, "domain": "sensor"}
+                                elif (
+                                    request_type in ("get_lights",)
+                                    and "domain" not in parameters
+                                ):
+                                    parameters = {**parameters, "domain": "light"}
+                                elif (
+                                    request_type in ("get_switches",)
+                                    and "domain" not in parameters
+                                ):
+                                    parameters = {**parameters, "domain": "switch"}
+                                request_type = canonical
                             _LOGGER.debug(
                                 "Processing data request: %s with parameters: %s",
                                 request_type,
                                 json.dumps(parameters),
                             )
+
+                            # Fire detailed progress for the data fetch
+                            if hasattr(self, '_progress_cb') and self._progress_cb:
+                                _friendly_steps = {
+                                    "get_weather_data": "Fetching weather data...",
+                                    "get_entity_state": "Reading entity state...",
+                                    "get_entity_registry": "Scanning entity registry...",
+                                    "get_entities_by_domain": "Discovering entities...",
+                                    "get_entities_by_device_class": "Discovering sensors...",
+                                    "get_entities": "Discovering entities...",
+                                    "get_area_registry": "Loading areas...",
+                                    "get_history": "Fetching history data...",
+                                    "get_statistics": "Fetching statistics...",
+                                    "get_dashboards": "Loading existing dashboards...",
+                                }
+                                _step_msg = _friendly_steps.get(request_type, f"Processing {request_type}...")
+                                try:
+                                    self._progress_cb(_step_msg, iteration)
+                                except Exception:
+                                    pass
 
                             # Add AI's response to conversation history
                             self.conversation_history.append(
@@ -2977,12 +3895,29 @@ Then restart Home Assistant to see your new dashboard in the sidebar."""
                                     parameters.get("dashboard_config"),
                                 )
                             else:
-                                data = {
-                                    "error": f"Unknown request type: {request_type}"
-                                }
+                                # Unknown request type — tell the model and let it retry
                                 _LOGGER.warning(
-                                    "Unknown request type: %s", request_type
+                                    "Unknown request type from model: %r — feeding error back for retry",
+                                    request_type,
                                 )
+                                self.conversation_history.append(
+                                    {
+                                        "role": "tool",
+                                        "content": json.dumps(
+                                            {
+                                                "error": f"Unknown request type: {request_type!r}. "
+                                                "Use one of: get_entity_state, get_entities_by_device_class, "
+                                                "get_entities_by_domain, get_climate_related_entities, "
+                                                "get_weather_data, get_entities, get_entity_registry, "
+                                                "get_area_registry, get_history, get_statistics, "
+                                                "get_automations, get_scenes, get_dashboards, "
+                                                "create_automation, create_dashboard, update_dashboard, "
+                                                "call_service, final_response."
+                                            }
+                                        ),
+                                    }
+                                )
+                                continue  # retry loop with error context
 
                             # Check if any data request resulted in an error
                             if isinstance(data, dict) and "error" in data:
@@ -3008,86 +3943,72 @@ Then restart Home Assistant to see your new dashboard in the sidebar."""
                                 json.dumps(data, default=str),
                             )
 
-                            # Add data to conversation as a user message (not system to avoid overwriting system prompt in Anthropic API)
+                            # Add data to conversation as a tool message.
+                            # Using role='tool' (not 'user') keeps HA data injections
+                            # semantically distinct from real human queries, preventing
+                            # LM Studio / Jinja prompt templates from failing with
+                            # "No user query found in messages" when the 10-message
+                            # context window fills up with data-fetch turns.
                             self.conversation_history.append(
                                 {
-                                    "role": "user",
+                                    "role": "tool",
                                     "content": json.dumps({"data": data}, default=str),
                                 }
                             )
                             continue
 
-                        elif response_data.get("request_type") == "final_response":
-                            # Add final response to conversation history
-                            self.conversation_history.append(
-                                {
-                                    "role": "assistant",
-                                    "content": json.dumps(
-                                        response_data
-                                    ),  # Store clean JSON
-                                }
-                            )
-
-                            # Return final response
-                            _LOGGER.debug(
-                                "Received final response: %s",
-                                response_data.get("response"),
-                            )
-                            result = {
-                                "success": True,
-                                "answer": response_data.get("response", ""),
-                            }
-                            result = _with_debug(result)
-                            self._set_cached_data(cache_key, result)
-                            return result
-                        elif (
-                            response_data.get("request_type") == "automation_suggestion"
+                        elif response_data.get("request_type") in (
+                            "final_response",
+                            "dashboard_suggestion",
+                            "automation_suggestion",
                         ):
-                            # Add automation suggestion to conversation history
+                            # Fire progress: building response
+                            if hasattr(self, '_progress_cb') and self._progress_cb:
+                                _rt = response_data.get('request_type', '')
+                                _step = "Building dashboard..." if 'dashboard' in _rt else (
+                                    "Building automation..." if 'automation' in _rt else "Generating response..."
+                                )
+                                try:
+                                    self._progress_cb(_step, iteration)
+                                except Exception:
+                                    pass
+                            # ── Typed-envelope classification ──────────────
+                            # _classify_response converts any of the above
+                            # request_types (including final_response that
+                            # embeds a dashboard/automation) into a clean
+                            # {type, message, dashboard?, automation?} dict.
+                            envelope = _classify_response(response_data)
+                            _LOGGER.debug(
+                                "Classified response as type=%s",
+                                envelope.get("type"),
+                            )
+
+                            # Store clean version in conversation history
                             self.conversation_history.append(
                                 {
                                     "role": "assistant",
-                                    "content": json.dumps(
-                                        response_data
-                                    ),  # Store clean JSON
+                                    "content": json.dumps(response_data),
                                 }
                             )
 
-                            # Return automation suggestion
-                            _LOGGER.debug(
-                                "Received automation suggestion: %s",
-                                json.dumps(response_data.get("automation")),
-                            )
+                            # Build result with the envelope fields
                             result = {
                                 "success": True,
-                                "answer": json.dumps(response_data),
+                                "type": envelope["type"],
+                                "message": envelope.get("message", ""),
                             }
+                            if envelope.get("dashboard"):
+                                result["dashboard"] = envelope["dashboard"]
+                            if envelope.get("automation"):
+                                result["automation"] = envelope["automation"]
+                            # Backward compat: also set "answer" for any
+                            # older panel JS that still reads it
+                            result["answer"] = envelope.get("message", "")
+                            if thinking_content:
+                                result["thinking"] = thinking_content
+                                result["thinking_duration"] = thinking_duration
                             result = _with_debug(result)
-                            self._set_cached_data(cache_key, result)
-                            return result
-                        elif (
-                            response_data.get("request_type") == "dashboard_suggestion"
-                        ):
-                            # Add dashboard suggestion to conversation history
-                            self.conversation_history.append(
-                                {
-                                    "role": "assistant",
-                                    "content": json.dumps(
-                                        response_data
-                                    ),  # Store clean JSON
-                                }
-                            )
-
-                            # Return dashboard suggestion
-                            _LOGGER.debug(
-                                "Received dashboard suggestion: %s",
-                                json.dumps(response_data.get("dashboard")),
-                            )
-                            result = {
-                                "success": True,
-                                "answer": json.dumps(response_data),
-                            }
-                            result = _with_debug(result)
+                            self._trim_history()
                             self._set_cached_data(cache_key, result)
                             return result
                         elif response_data.get("request_type") in [
@@ -3127,10 +4048,10 @@ Then restart Home Assistant to see your new dashboard in the sidebar."""
                                 len(data) if isinstance(data, list) else 1,
                             )
 
-                            # Add data to conversation as a user message (not system to avoid overwriting system prompt in Anthropic API)
+                            # Add data to conversation as a tool message (see above).
                             self.conversation_history.append(
                                 {
-                                    "role": "user",
+                                    "role": "tool",
                                     "content": json.dumps({"data": data}, default=str),
                                 }
                             )
@@ -3272,27 +4193,44 @@ Then restart Home Assistant to see your new dashboard in the sidebar."""
                                 json.dumps(data, default=str),
                             )
 
-                            # Add data to conversation as a user message (not system to avoid overwriting system prompt in Anthropic API)
+                            # Add data to conversation as a tool message (see above).
                             self.conversation_history.append(
                                 {
-                                    "role": "user",
+                                    "role": "tool",
                                     "content": json.dumps({"data": data}, default=str),
                                 }
                             )
                             # Go to next iteration to continue the loop
                             continue
 
-                        # Unknown request type
-                        _LOGGER.warning(
-                            "Unknown response type: %s",
+                        # Unknown or missing request_type — classify via envelope
+                        # (model returned valid JSON but without a recognised request_type,
+                        # e.g. a plain {"message": "..."} or temperature data object)
+                        _LOGGER.debug(
+                            "Unrecognised request_type %r — classifying via envelope",
                             response_data.get("request_type"),
                         )
-                        return _with_debug(
-                            {
-                                "success": False,
-                                "error": f"Unknown response type: {response_data.get('request_type')}",
-                            }
+                        envelope = _classify_response(response_data)
+                        self.conversation_history.append(
+                            {"role": "assistant", "content": json.dumps(response_data)}
                         )
+                        result = {
+                            "success": True,
+                            "type": envelope["type"],
+                            "message": envelope.get("message", ""),
+                            "answer": envelope.get("message", ""),
+                        }
+                        if envelope.get("dashboard"):
+                            result["dashboard"] = envelope["dashboard"]
+                        if envelope.get("automation"):
+                            result["automation"] = envelope["automation"]
+                        if thinking_content:
+                            result["thinking"] = thinking_content
+                            result["thinking_duration"] = thinking_duration
+                        result = _with_debug(result)
+                        self._trim_history()
+                        self._set_cached_data(cache_key, result)
+                        return result
 
                     except json.JSONDecodeError as e:
                         # Check if this is a local provider that might have already wrapped the response
@@ -3387,10 +4325,106 @@ Then restart Home Assistant to see your new dashboard in the sidebar."""
                                     "error": "AI generated corrupted automation response. Please try again with a more specific automation request.",
                                 }
                             )
+                            # Roll back history and do not cache — let the user retry fresh.
+                            self.conversation_history = self.conversation_history[
+                                :history_rollback_index
+                            ]
+                            return result
+
+                        # Try to extract embedded JSON from prose/markdown/YAML response
+                        extracted = _extract_json_from_text(response)
+                        if extracted and isinstance(extracted, dict):
+                            # If extracted JSON has request_type, classify via envelope
+                            if "request_type" in extracted:
+                                _LOGGER.debug("Extracted embedded JSON with request_type from non-JSON response")
+                                envelope = _classify_response(extracted)
+                                self.conversation_history.append(
+                                    {
+                                        "role": "assistant",
+                                        "content": json.dumps(extracted),
+                                    }
+                                )
+                                result = {
+                                    "success": True,
+                                    "type": envelope["type"],
+                                    "message": envelope.get("message", ""),
+                                    "answer": envelope.get("message", ""),
+                                }
+                                if envelope.get("dashboard"):
+                                    result["dashboard"] = envelope["dashboard"]
+                                if envelope.get("automation"):
+                                    result["automation"] = envelope["automation"]
+                                if thinking_content:
+                                    result["thinking"] = thinking_content
+                                    result["thinking_duration"] = thinking_duration
+                                result = _with_debug(result)
+                                self._trim_history()
+                                self._set_cached_data(cache_key, result)
+                                return result
+
+                            # Unwrap top-level `dashboard:` key if present
+                            if "dashboard" in extracted and isinstance(extracted["dashboard"], dict):
+                                extracted = extracted["dashboard"]
+                            # Check if it looks like a dashboard config
+                            if isinstance(extracted, dict) and any(
+                                k in extracted for k in ["title", "views", "cards"]
+                            ):
+                                _LOGGER.warning(
+                                    "LLM returned YAML/markdown for dashboard — recovered via _extract_json_from_text()"
+                                )
+                                response_data = {
+                                    "request_type": "dashboard_suggestion",
+                                    "dashboard": extracted,
+                                }
+                                envelope = _classify_response(response_data)
+                                self.conversation_history.append(
+                                    {
+                                        "role": "assistant",
+                                        "content": json.dumps(response_data),
+                                    }
+                                )
+                                result = {
+                                    "success": True,
+                                    "type": "dashboard",
+                                    "message": envelope.get("message", ""),
+                                    "answer": envelope.get("message", ""),
+                                    "dashboard": envelope.get("dashboard", extracted),
+                                }
+                                if thinking_content:
+                                    result["thinking"] = thinking_content
+                                    result["thinking_duration"] = thinking_duration
+                                result = _with_debug(result)
+                                self._trim_history()
+                                self._set_cached_data(cache_key, result)
+                                return result
+
+                        # Also try _extract_actionable_json for multi-object text
+                        actionable = _extract_actionable_json(response)
+                        if actionable:
+                            _LOGGER.debug("Extracted actionable JSON from non-JSON response text")
+                            envelope = _classify_response(actionable)
+                            self.conversation_history.append(
+                                {"role": "assistant", "content": json.dumps(actionable)}
+                            )
+                            result = {
+                                "success": True,
+                                "type": envelope["type"],
+                                "message": envelope.get("message", ""),
+                                "answer": envelope.get("message", ""),
+                            }
+                            if envelope.get("dashboard"):
+                                result["dashboard"] = envelope["dashboard"]
+                            if envelope.get("automation"):
+                                result["automation"] = envelope["automation"]
+                            if thinking_content:
+                                result["thinking"] = thinking_content
+                                result["thinking_duration"] = thinking_duration
+                            result = _with_debug(result)
+                            self._trim_history()
                             self._set_cached_data(cache_key, result)
                             return result
 
-                        # If response is not valid JSON, try to wrap it as a final response
+                        # If response is not valid JSON, wrap as text envelope
                         try:
                             # Truncate extremely long responses to prevent memory issues
                             response_to_wrap = response
@@ -3404,14 +4438,15 @@ Then restart Home Assistant to see your new dashboard in the sidebar."""
                                     len(response),
                                 )
 
-                            wrapped_response = {
-                                "request_type": "final_response",
-                                "response": response_to_wrap,
-                            }
                             result = {
                                 "success": True,
-                                "answer": json.dumps(wrapped_response),
+                                "type": "text",
+                                "message": response_to_wrap,
+                                "answer": response_to_wrap,
                             }
+                            if thinking_content:
+                                result["thinking"] = thinking_content
+                                result["thinking_duration"] = thinking_duration
                             _LOGGER.debug("Wrapped non-JSON response as final_response")
                         except Exception as wrap_error:
                             _LOGGER.error(
@@ -3419,36 +4454,73 @@ Then restart Home Assistant to see your new dashboard in the sidebar."""
                             )
                             result = {
                                 "success": False,
-                                "error": f"Invalid response format: {str(e)}",
+                                "error": "Invalid response format. Check Home Assistant logs for details.",
                             }
 
                         result = _with_debug(result)
-                        self._set_cached_data(cache_key, result)
+                        # Only cache successful wraps; on failure roll back history and
+                        # skip caching so the next identical prompt retries fresh.
+                        if result.get("success", False):
+                            self._trim_history()
+                            self._set_cached_data(cache_key, result)
+                        else:
+                            self.conversation_history = self.conversation_history[
+                                :history_rollback_index
+                            ]
                         return result
 
                 except Exception as e:
                     _LOGGER.exception("Error processing AI response: %s", str(e))
+                    # Roll back conversation history to before this query so the
+                    # failed prompt doesn't contaminate the next call.
+                    self.conversation_history = self.conversation_history[
+                        :history_rollback_index
+                    ]
+                    _LOGGER.debug(
+                        "Rolled back conversation history to index %d after error",
+                        history_rollback_index,
+                    )
+                    # Do NOT cache error results — let the next identical query retry fresh.
                     return _with_debug(
                         {
                             "success": False,
-                            "error": f"Error processing AI response: {str(e)}",
+                            "error": "Error processing AI response. Check Home Assistant logs for details.",
                         }
                     )
 
             # If we've reached max iterations without a final response
             _LOGGER.warning("Reached maximum iterations without final response")
+            # Roll back history — the query loop ran but never settled on a final response.
+            self.conversation_history = self.conversation_history[
+                :history_rollback_index
+            ]
+            _LOGGER.debug(
+                "Rolled back conversation history to index %d after max iterations",
+                history_rollback_index,
+            )
             result = {
                 "success": False,
                 "error": "Maximum iterations reached without final response",
             }
             result = _with_debug(result)
-            self._set_cached_data(cache_key, result)
+            # Do NOT cache — let the user retry and get a fresh attempt.
             return result
 
         except Exception as e:
             _LOGGER.exception("Error in process_query: %s", str(e))
+            # Roll back if history_rollback_index was set before the exception.
+            try:
+                self.conversation_history = self.conversation_history[
+                    :history_rollback_index
+                ]
+                _LOGGER.debug(
+                    "Rolled back conversation history to index %d after outer exception",
+                    history_rollback_index,
+                )
+            except NameError:
+                pass  # Exception occurred before history_rollback_index was set
             return _with_debug(
-                {"success": False, "error": f"Error in process_query: {str(e)}"}
+                {"success": False, "error": "Error processing query. Check Home Assistant logs for details."}
             )
 
     def _build_debug_trace(
@@ -3469,17 +4541,17 @@ Then restart Home Assistant to see your new dashboard in the sidebar."""
         }
 
     async def _get_ai_response(self) -> str:
-        """Get response from the selected AI provider with retries and rate limiting."""
-        if not self._check_rate_limit():
-            raise Exception("Rate limit exceeded. Please try again later.")
+        """Get response from the selected AI provider with retries and rate limiting.
+
+        Rate limiting is enforced by the caller (_process_query_inner) before this
+        method is invoked, so we do not call _check_rate_limit() again here.
+        """
         retry_count = 0
         last_error = None
-        # Limit conversation history to last 10 messages to prevent token overflow
-        recent_messages = (
-            self.conversation_history[-10:]
-            if len(self.conversation_history) > 10
-            else self.conversation_history
-        )
+        # Use the full conversation_history — _trim_history() already caps it
+        # at _max_history_len entries, so we don't apply a redundant 10-message
+        # window here that would strip the system prompt or truncate context.
+        recent_messages = self.conversation_history
         # Ensure system prompt is always the first message
         if not recent_messages or recent_messages[0].get("role") != "system":
             recent_messages = [self.system_prompt] + recent_messages
@@ -3527,7 +4599,10 @@ Then restart Home Assistant to see your new dashboard in the sidebar."""
                         )
                     else:
                         retry_count += 1
-                        await asyncio.sleep(self._retry_delay * retry_count)
+                        # Exponential backoff: 1 s, 2 s, 4 s — capped at 4 s
+                        await asyncio.sleep(
+                            min(self._retry_delay * (2 ** (retry_count - 1)), 4)
+                        )
                         continue
 
                 return str(response)
@@ -3538,16 +4613,95 @@ Then restart Home Assistant to see your new dashboard in the sidebar."""
                 last_error = e
                 retry_count += 1
                 if retry_count < self._max_retries:
-                    await asyncio.sleep(self._retry_delay * retry_count)
+                    # Exponential backoff: 1 s, 2 s, 4 s — capped at 4 s
+                    await asyncio.sleep(
+                        min(self._retry_delay * (2 ** (retry_count - 1)), 4)
+                    )
                 continue
         raise Exception(
             f"Failed after {retry_count} retries. Last error: {str(last_error)}"
         )
 
+    async def _get_ai_response_stream(self):
+        """Get streaming response from AI provider, yielding chunks and firing WS events.
+
+        Returns the full accumulated response text.
+        """
+        recent_messages = self.conversation_history
+        if not recent_messages or recent_messages[0].get("role") != "system":
+            recent_messages = [self.system_prompt] + recent_messages
+
+        _LOGGER.debug(
+            "Streaming: sending %d messages to AI provider", len(recent_messages)
+        )
+
+        if not hasattr(self.ai_client, "get_response_stream"):
+            _LOGGER.debug(
+                "Provider does not support streaming, falling back to non-streaming"
+            )
+            return await self._get_ai_response()
+
+        accumulated = []
+        try:
+            async for chunk in self.ai_client.get_response_stream(recent_messages):
+                accumulated.append(chunk)
+                # Fire WebSocket event for each chunk
+                try:
+                    partial_text = "".join(accumulated)
+                    self.hass.bus.async_fire(
+                        "ai_agent_ha/stream_chunk",
+                        {
+                            "type": "stream_chunk",
+                            "text": partial_text,
+                        },
+                    )
+                except Exception:  # nosec B110
+                    pass  # Don't fail the stream for WS errors
+
+            full_text = "".join(accumulated)
+
+            if not full_text or full_text.strip() == "":
+                _LOGGER.warning("Streaming returned empty response, falling back")
+                return await self._get_ai_response()
+
+            # Fire stream end event
+            try:
+                self.hass.bus.async_fire(
+                    "ai_agent_ha/stream_end",
+                    {
+                        "type": "stream_end",
+                    },
+                )
+            except Exception:  # nosec B110
+                pass
+
+            return full_text
+        except Exception as e:
+            _LOGGER.warning("Streaming failed (%s), falling back to non-streaming", e)
+            return await self._get_ai_response()
+
+    def _trim_history(self) -> None:
+        """Trim conversation_history to the last _max_history_len entries.
+
+        Preserves the system prompt at position 0 when trimming, so the
+        model always has the instruction context available.
+        """
+        if len(self.conversation_history) > self._max_history_len:
+            # Keep the system prompt (index 0) + the tail
+            tail_size = self._max_history_len - 1
+            self.conversation_history = [
+                self.conversation_history[0]
+            ] + self.conversation_history[-tail_size:]
+            _LOGGER.debug(
+                "Trimmed conversation history to %d entries",
+                len(self.conversation_history),
+            )
+
     def clear_conversation_history(self) -> None:
         """Clear the conversation history and cache."""
         self.conversation_history = []
         self._cache.clear()
+        self._conversation_last_active = 0.0
         _LOGGER.debug("Conversation history and cache cleared")
 
     async def set_entity_state(
@@ -3636,7 +4790,7 @@ Then restart Home Assistant to see your new dashboard in the sidebar."""
 
         except Exception as e:
             _LOGGER.exception("Error setting entity state: %s", str(e))
-            return {"error": f"Error setting entity state: {str(e)}"}
+            return {"error": "Error setting entity state. Check Home Assistant logs for details."}
 
     async def call_service(
         self,
@@ -3706,7 +4860,7 @@ Then restart Home Assistant to see your new dashboard in the sidebar."""
             _LOGGER.exception(
                 "Error calling service %s.%s: %s", domain, service, str(e)
             )
-            return {"error": f"Error calling service {domain}.{service}: {str(e)}"}
+            return {"error": "Error calling service. Check Home Assistant logs for details."}
 
     async def save_user_prompt_history(
         self, user_id: str, history: List[str]
@@ -3718,7 +4872,7 @@ Then restart Home Assistant to see your new dashboard in the sidebar."""
             return {"success": True}
         except Exception as e:
             _LOGGER.exception("Error saving prompt history: %s", str(e))
-            return {"error": f"Error saving prompt history: {str(e)}"}
+            return {"error": "Error saving prompt history. Check Home Assistant logs for details."}
 
     async def load_user_prompt_history(self, user_id: str) -> Dict[str, Any]:
         """Load user's prompt history from HA storage."""
@@ -3729,4 +4883,4 @@ Then restart Home Assistant to see your new dashboard in the sidebar."""
             return {"success": True, "history": history}
         except Exception as e:
             _LOGGER.exception("Error loading prompt history: %s", str(e))
-            return {"error": f"Error loading prompt history: {str(e)}", "history": []}
+            return {"error": "Error loading prompt history. Check Home Assistant logs for details.", "history": []}

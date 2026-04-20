@@ -5,6 +5,16 @@ All notable changes to the AI Agent HA project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.0] - 2026-04-11
+
+### Fixed
+- **Dashboard YAML Recovery**: LLM responses returning YAML instead of JSON for dashboard requests are now automatically recovered via `yaml.safe_load()` and routed to the visual dashboard preview flow
+- Strengthened system prompt with a CRITICAL JSON-only output block at the very top to prevent LLMs (especially Claude Opus via Ask Sage) from returning YAML
+
+### Changed
+- Added YAML→JSON recovery path in `JSONDecodeError` handler — detects dashboard-like YAML indicators (`title:`, `views:`, `cards:`) and converts to `dashboard_suggestion` JSON before falling back to `final_response`
+- Added reinforcement text after dashboard JSON structure in both `SYSTEM_PROMPT` and `SYSTEM_PROMPT_LOCAL`
+
 ## [Unreleased]
 
 ### Fixed

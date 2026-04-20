@@ -9,13 +9,25 @@ from homeassistant import config_entries
 from homeassistant.core import callback
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.selector import (
+    BooleanSelector,
+    SelectOptionDict,
     SelectSelector,
     SelectSelectorConfig,
     TextSelector,
     TextSelectorConfig,
 )
 
-from .const import CONF_LOCAL_MODEL, CONF_LOCAL_URL, DOMAIN
+from .const import (
+    CONF_ASKSAGE_DEEP_AGENT,
+    CONF_ASKSAGE_LIVE,
+    CONF_ASKSAGE_TOKEN,
+    CONF_ENABLE_STREAMING,
+    CONF_LOCAL_MODEL,
+    CONF_LOCAL_URL,
+    CONF_OPENAI_BASE_URL,
+    CONF_PERSIST_CHAT_HISTORY,
+    DOMAIN,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -28,6 +40,7 @@ PROVIDERS = {
     "alter": "Alter",
     "zai": "z.ai",
     "local": "Local Model",
+    "asksage": "Ask Sage",
 }
 
 TOKEN_FIELD_NAMES = {
@@ -40,7 +53,12 @@ TOKEN_FIELD_NAMES = {
     "zai": "zai_token",
     "zai_endpoint": "zai_endpoint",
     "local": CONF_LOCAL_URL,  # For local models, we use URL instead of token
+    "asksage": CONF_ASKSAGE_TOKEN,
 }
+
+OPENAI_BASE_URL_LABEL = (
+    "Custom Base URL (optional, e.g. http://192.168.0.57:1234/v1 for LM Studio)"
+)
 
 TOKEN_LABELS = {
     "llama": "Llama API Token",
@@ -52,6 +70,7 @@ TOKEN_LABELS = {
     "zai": "z.ai API Key",
     "zai_endpoint": "z.ai API Endpoint Type",
     "local": "Local API URL (e.g., http://localhost:11434/api/generate)",
+    "asksage": "Ask Sage API Token",
 }
 
 DEFAULT_MODELS = {
@@ -59,10 +78,11 @@ DEFAULT_MODELS = {
     "openai": "gpt-5",
     "gemini": "gemini-2.5-flash",
     "openrouter": "openai/gpt-4o",
-    "anthropic": "claude-sonnet-4-5-20250929",
+    "anthropic": "claude-opus-4-6",
     "alter": "",  # User enters custom model
     "zai": "glm-4.7",  # Z.ai's latest flagship model
     "local": "llama3.2",  # Updated to use llama3.2 as default
+    "asksage": "gpt-4o-mini",  # Sensible default; model list is fetched live from /get-models
 }
 
 AVAILABLE_MODELS = {
@@ -107,6 +127,9 @@ AVAILABLE_MODELS = {
         "deepseek/deepseek-r1",
     ],
     "anthropic": [
+        "claude-opus-4-6",
+        "claude-sonnet-4-6",
+        "claude-haiku-4-5-20251001",
         "claude-sonnet-4-5-20250929",
         "claude-sonnet-4-20250514",
         "claude-3-5-sonnet-20241022",
@@ -147,6 +170,22 @@ AVAILABLE_MODELS = {
         "deepseek-coder",
         "Custom...",
     ],
+    # Ask Sage — baseline list; config flow fetches live models from /get-models,
+    # filtering out any model whose id contains "gov".
+    "asksage": [
+        "gpt-4o-mini",
+        "gpt-4o",
+        "gpt-4-turbo",
+        "gpt-4",
+        "gpt-3.5-turbo",
+        "claude-3-5-sonnet",
+        "claude-3-haiku",
+        "gemini-2.0-flash",
+        "gemini-1.5-pro",
+        "llama-3.1-70b",
+        "mistral-large",
+        "Custom...",
+    ],
 }
 
 DEFAULT_PROVIDER = "openai"
@@ -156,7 +195,7 @@ class AiAgentHaConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):  # type: ig
     """Handle a config flow for AI Agent HA."""
 
     VERSION = 1
-    CONNECTION_CLASS = config_entries.CONN_CLASS_CLOUD_POLL
+    MINOR_VERSION = 1
 
     @staticmethod
     @callback
@@ -217,6 +256,11 @@ class AiAgentHaConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):  # type: ig
 
                 # Store the configuration data
                 self.config_data[token_field] = token_value
+
+                # For OpenAI, persist optional custom base URL
+                if provider == "openai":
+                    base_url = user_input.get(CONF_OPENAI_BASE_URL, "").strip()
+                    self.config_data[CONF_OPENAI_BASE_URL] = base_url
 
                 # For z.ai, store endpoint type
                 if provider == "zai":
@@ -314,8 +358,78 @@ class AiAgentHaConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):  # type: ig
                 data_schema=vol.Schema(schema_dict),
                 errors=errors,
                 description_placeholders={
-                    "token_label": "Local API URL",
+                    "token_label": "Local API URL",  # nosec B105
                     "provider": PROVIDERS[provider],
+                },
+            )
+
+        if provider == "asksage":
+            # Fetch live model list from Ask Sage /get-models (public endpoint,
+            # no auth required). Filter out any model whose id contains "gov".
+            import aiohttp
+
+            live_models = []
+            try:
+                async with aiohttp.ClientSession() as session:
+                    async with session.get(
+                        "https://api.asksage.ai/server/get-models",
+                        timeout=aiohttp.ClientTimeout(total=10),
+                    ) as resp:
+                        if resp.status == 200:
+                            data = await resp.json()
+                            raw = data.get("data", [])
+                            live_models = [
+                                m["id"]
+                                for m in raw
+                                if isinstance(m, dict)
+                                and "id" in m
+                                and "gov" not in m["id"].lower()
+                            ]
+                            _LOGGER.debug(
+                                "Ask Sage live models fetched: %d (after gov filter)",
+                                len(live_models),
+                            )
+            except Exception as exc:  # noqa: BLE001
+                _LOGGER.warning("Could not fetch Ask Sage model list: %s", exc)
+
+            model_options = live_models if live_models else AVAILABLE_MODELS["asksage"]
+            # Ensure the default is in the list, add Custom... for override
+            if DEFAULT_MODELS["asksage"] not in model_options:
+                model_options = [DEFAULT_MODELS["asksage"]] + model_options
+            if "Custom..." not in model_options:
+                model_options = model_options + ["Custom..."]
+
+            schema_dict = {
+                vol.Required(CONF_ASKSAGE_TOKEN): TextSelector(
+                    TextSelectorConfig(type="password")
+                ),
+                vol.Optional(
+                    "model", default=DEFAULT_MODELS["asksage"]
+                ): SelectSelector(SelectSelectorConfig(options=model_options)),
+                vol.Optional("custom_model"): TextSelector(
+                    TextSelectorConfig(type="text")
+                ),
+                vol.Optional(CONF_ASKSAGE_LIVE, default=0): SelectSelector(
+                    SelectSelectorConfig(
+                        options=[
+                            SelectOptionDict(value="0", label="Off"),
+                            SelectOptionDict(value="1", label="Live (Google)"),
+                            SelectOptionDict(
+                                value="2", label="Live+ (Google + web crawl)"
+                            ),
+                        ]
+                    )
+                ),
+                vol.Optional(CONF_ASKSAGE_DEEP_AGENT, default=False): BooleanSelector(),
+            }
+
+            return self.async_show_form(
+                step_id="configure",
+                data_schema=vol.Schema(schema_dict),
+                errors=errors,
+                description_placeholders={
+                    "token_label": TOKEN_LABELS["asksage"],
+                    "provider": PROVIDERS["asksage"],
                 },
             )
 
@@ -325,6 +439,12 @@ class AiAgentHaConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):  # type: ig
                 TextSelectorConfig(type="password")
             ),
         }
+
+        # For OpenAI provider, add optional custom base URL override
+        if provider == "openai":
+            schema_dict[vol.Optional(CONF_OPENAI_BASE_URL, default="")] = TextSelector(
+                TextSelectorConfig(type="url")
+            )
 
         # Add model selection if available
         if available_models:
@@ -423,6 +543,21 @@ class AiAgentHaOptionsFlowHandler(config_entries.OptionsFlow):
                     updated_data["ai_provider"] = provider
                     updated_data[token_field] = token_value
 
+                    # Chat persistence opt-in
+                    updated_data[CONF_PERSIST_CHAT_HISTORY] = user_input.get(
+                        CONF_PERSIST_CHAT_HISTORY, False
+                    )
+
+                    # SSE streaming opt-in
+                    updated_data[CONF_ENABLE_STREAMING] = user_input.get(
+                        CONF_ENABLE_STREAMING, False
+                    )
+
+                    # For OpenAI, persist custom base URL if provided
+                    if provider == "openai":
+                        base_url = user_input.get(CONF_OPENAI_BASE_URL, "").strip()
+                        updated_data[CONF_OPENAI_BASE_URL] = base_url
+
                     # Update model configuration
                     selected_model = user_input.get("model")
                     custom_model = user_input.get("custom_model")
@@ -457,15 +592,20 @@ class AiAgentHaOptionsFlowHandler(config_entries.OptionsFlow):
                         f"Options flow - Final model config for {provider}: {updated_data['models'].get(provider)}"
                     )
 
-                    # Update the config entry
+                    # Update the config entry, refreshing title if provider changed
+                    new_title = f"AI Agent HA ({PROVIDERS[provider]})"
                     self.hass.config_entries.async_update_entry(
-                        self.config_entry, data=updated_data
+                        self.config_entry, title=new_title, data=updated_data
                     )
 
                     return self.async_create_entry(title="", data={})
             except Exception:  # pylint: disable=broad-except
                 _LOGGER.exception("Unexpected exception in options flow")
                 errors["base"] = "unknown"
+
+        # Current persistence setting (shared across all provider schemas)
+        current_persist = self.config_entry.data.get(CONF_PERSIST_CHAT_HISTORY, False)
+        current_streaming = self.config_entry.data.get(CONF_ENABLE_STREAMING, False)
 
         # Build schema for the selected provider in options
         if provider == "zai":
@@ -489,6 +629,12 @@ class AiAgentHaOptionsFlowHandler(config_entries.OptionsFlow):
                 vol.Optional("custom_model"): TextSelector(
                     TextSelectorConfig(type="text")
                 ),
+                vol.Optional(
+                    CONF_PERSIST_CHAT_HISTORY, default=current_persist
+                ): BooleanSelector(),
+                vol.Optional(
+                    CONF_ENABLE_STREAMING, default=current_streaming
+                ): BooleanSelector(),
             }
 
             return self.async_show_form(
@@ -521,14 +667,97 @@ class AiAgentHaOptionsFlowHandler(config_entries.OptionsFlow):
             schema_dict[vol.Optional("custom_model")] = TextSelector(
                 TextSelectorConfig(type="text")
             )
+            schema_dict[
+                vol.Optional(CONF_PERSIST_CHAT_HISTORY, default=current_persist)
+            ] = BooleanSelector()
+            schema_dict[
+                vol.Optional(CONF_ENABLE_STREAMING, default=current_streaming)
+            ] = BooleanSelector()
 
             return self.async_show_form(
                 step_id="configure_options",
                 data_schema=vol.Schema(schema_dict),
                 errors=errors,
                 description_placeholders={
-                    "token_label": "Local API URL",
+                    "token_label": "Local API URL",  # nosec B105
                     "provider": PROVIDERS[provider],
+                },
+            )
+
+        if provider == "asksage":
+            # Fetch live model list, filter out gov models
+            import aiohttp
+
+            live_models = []
+            try:
+                async with aiohttp.ClientSession() as session:
+                    async with session.get(
+                        "https://api.asksage.ai/server/get-models",
+                        timeout=aiohttp.ClientTimeout(total=10),
+                    ) as resp:
+                        if resp.status == 200:
+                            data = await resp.json()
+                            raw = data.get("data", [])
+                            live_models = [
+                                m["id"]
+                                for m in raw
+                                if isinstance(m, dict)
+                                and "id" in m
+                                and "gov" not in m["id"].lower()
+                            ]
+            except Exception as exc:  # noqa: BLE001
+                _LOGGER.warning("Could not fetch Ask Sage model list: %s", exc)
+
+            model_options = live_models if live_models else AVAILABLE_MODELS["asksage"]
+            if current_model and current_model not in model_options:
+                model_options = [current_model] + model_options
+            if "Custom..." not in model_options:
+                model_options = model_options + ["Custom..."]
+
+            current_live = self.config_entry.data.get(CONF_ASKSAGE_LIVE, 0)
+            current_deep_agent = self.config_entry.data.get(
+                CONF_ASKSAGE_DEEP_AGENT, False
+            )
+
+            schema_dict = {
+                vol.Required(CONF_ASKSAGE_TOKEN, default=display_token): TextSelector(
+                    TextSelectorConfig(type="password")
+                ),
+                vol.Optional(
+                    "model", default=current_model or DEFAULT_MODELS["asksage"]
+                ): SelectSelector(SelectSelectorConfig(options=model_options)),
+                vol.Optional("custom_model"): TextSelector(
+                    TextSelectorConfig(type="text")
+                ),
+                vol.Optional(CONF_ASKSAGE_LIVE, default=current_live): SelectSelector(
+                    SelectSelectorConfig(
+                        options=[
+                            SelectOptionDict(value="0", label="Off"),
+                            SelectOptionDict(value="1", label="Live (Google)"),
+                            SelectOptionDict(
+                                value="2", label="Live+ (Google + web crawl)"
+                            ),
+                        ]
+                    )
+                ),
+                vol.Optional(
+                    CONF_ASKSAGE_DEEP_AGENT, default=current_deep_agent
+                ): BooleanSelector(),
+                vol.Optional(
+                    CONF_PERSIST_CHAT_HISTORY, default=current_persist
+                ): BooleanSelector(),
+                vol.Optional(
+                    CONF_ENABLE_STREAMING, default=current_streaming
+                ): BooleanSelector(),
+            }
+
+            return self.async_show_form(
+                step_id="configure_options",
+                data_schema=vol.Schema(schema_dict),
+                errors=errors,
+                description_placeholders={
+                    "token_label": TOKEN_LABELS["asksage"],
+                    "provider": PROVIDERS["asksage"],
                 },
             )
 
@@ -538,6 +767,13 @@ class AiAgentHaOptionsFlowHandler(config_entries.OptionsFlow):
                 TextSelectorConfig(type="password")
             ),
         }
+
+        # For OpenAI provider, add optional custom base URL override
+        if provider == "openai":
+            current_base_url = self.config_entry.data.get(CONF_OPENAI_BASE_URL, "")
+            schema_dict[
+                vol.Optional(CONF_OPENAI_BASE_URL, default=current_base_url)
+            ] = TextSelector(TextSelectorConfig(type="url"))
 
         # Add model selection if available
         if available_models:
@@ -552,6 +788,13 @@ class AiAgentHaOptionsFlowHandler(config_entries.OptionsFlow):
             schema_dict[vol.Optional("custom_model")] = TextSelector(
                 TextSelectorConfig(type="text")
             )
+
+        schema_dict[
+            vol.Optional(CONF_PERSIST_CHAT_HISTORY, default=current_persist)
+        ] = BooleanSelector()
+        schema_dict[vol.Optional(CONF_ENABLE_STREAMING, default=current_streaming)] = (
+            BooleanSelector()
+        )
 
         return self.async_show_form(
             step_id="configure_options",

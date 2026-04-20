@@ -1,6 +1,8 @@
 {
-  "name": "AI Agent HA",
+  "name": "AI Agent HA Extended",
   "render_readme": true,
   "country": "US",
-  "homeassistant": "2024.1.0"
+  "homeassistant": "2024.1.0",
+  "content_in_root": false,
+  "filename": "ai_agent_ha-panel.js"
 }
