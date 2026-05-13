@@ -314,7 +314,7 @@ class AiAgentHaConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):  # type: ig
                 data_schema=vol.Schema(schema_dict),
                 errors=errors,
                 description_placeholders={
-                    "token_label": "Local API URL",
+                    "token_label": "Local API URL",  # nosec B105 - UI label string shown next to the URL field, not a credential
                     "provider": PROVIDERS[provider],
                 },
             )
@@ -412,6 +412,32 @@ class AiAgentHaOptionsFlowHandler(config_entries.OptionsFlow):
         # Use current token if provider hasn't changed, otherwise empty
         display_token = current_token if provider == current_provider else ""
 
+        # Determine if current model is a custom model (not in available models list)
+        # and prepare model dropdown and custom model field defaults
+        model_options = available_models
+        if "Custom..." not in model_options:
+            model_options = model_options + ["Custom..."]
+
+        # Check if current_model is a custom model (not in the available models)
+        # Remove "Custom..." from the check since it's the selector option, not a real model
+        available_models_without_custom = [
+            m for m in available_models if m != "Custom..."
+        ]
+        is_custom_model = (
+            current_model
+            and current_model not in available_models_without_custom
+            and current_model != "Custom..."
+        )
+
+        if is_custom_model:
+            # Current model is a custom model - show "Custom..." in dropdown and populate custom field
+            model_default = "Custom..."
+            custom_model_default = current_model
+        else:
+            # Current model is a standard model or empty
+            model_default = current_model if current_model else "Custom..."
+            custom_model_default = ""
+
         if user_input is not None:
             try:
                 token_value = user_input.get(token_field)
@@ -471,6 +497,9 @@ class AiAgentHaOptionsFlowHandler(config_entries.OptionsFlow):
         if provider == "zai":
             current_endpoint = self.config_entry.data.get("zai_endpoint", "general")
             model_options = AVAILABLE_MODELS.get("zai", ["glm-4.7"])
+            # Ensure "Custom..." is in model options
+            if "Custom..." not in model_options:
+                model_options = model_options + ["Custom..."]
             schema_dict = {
                 vol.Required(token_field, default=display_token): TextSelector(
                     TextSelectorConfig(type="password")
@@ -483,12 +512,12 @@ class AiAgentHaOptionsFlowHandler(config_entries.OptionsFlow):
                         ]
                     )
                 ),
-                vol.Optional("model", default=current_model): SelectSelector(
+                vol.Optional("model", default=model_default): SelectSelector(
                     SelectSelectorConfig(options=model_options)
                 ),
-                vol.Optional("custom_model"): TextSelector(
-                    TextSelectorConfig(type="text")
-                ),
+                vol.Optional(
+                    "custom_model", default=custom_model_default
+                ): TextSelector(TextSelectorConfig(type="text")),
             }
 
             return self.async_show_form(
@@ -513,13 +542,14 @@ class AiAgentHaOptionsFlowHandler(config_entries.OptionsFlow):
 
             # Add model selection
             model_options = AVAILABLE_MODELS.get("local", ["Custom..."])
-            schema_dict[
-                vol.Optional(
-                    "model", default=current_model if current_model else "Custom..."
-                )
-            ] = SelectSelector(SelectSelectorConfig(options=model_options))
-            schema_dict[vol.Optional("custom_model")] = TextSelector(
-                TextSelectorConfig(type="text")
+            # Ensure "Custom..." is in model options
+            if "Custom..." not in model_options:
+                model_options = model_options + ["Custom..."]
+            schema_dict[vol.Optional("model", default=model_default)] = SelectSelector(
+                SelectSelectorConfig(options=model_options)
+            )
+            schema_dict[vol.Optional("custom_model", default=custom_model_default)] = (
+                TextSelector(TextSelectorConfig(type="text"))
             )
 
             return self.async_show_form(
@@ -527,7 +557,7 @@ class AiAgentHaOptionsFlowHandler(config_entries.OptionsFlow):
                 data_schema=vol.Schema(schema_dict),
                 errors=errors,
                 description_placeholders={
-                    "token_label": "Local API URL",
+                    "token_label": "Local API URL",  # nosec B105 - UI label string shown next to the URL field, not a credential
                     "provider": PROVIDERS[provider],
                 },
             )
@@ -541,16 +571,12 @@ class AiAgentHaOptionsFlowHandler(config_entries.OptionsFlow):
 
         # Add model selection if available
         if available_models:
-            # Add predefined models + custom option (avoid duplicating "Custom...")
-            if "Custom..." in available_models:
-                model_options = available_models
-            else:
-                model_options = available_models + ["Custom..."]
-            schema_dict[vol.Optional("model", default=current_model)] = SelectSelector(
+            # model_options already has "Custom..." added above
+            schema_dict[vol.Optional("model", default=model_default)] = SelectSelector(
                 SelectSelectorConfig(options=model_options)
             )
-            schema_dict[vol.Optional("custom_model")] = TextSelector(
-                TextSelectorConfig(type="text")
+            schema_dict[vol.Optional("custom_model", default=custom_model_default)] = (
+                TextSelector(TextSelectorConfig(type="text"))
             )
 
         return self.async_show_form(
