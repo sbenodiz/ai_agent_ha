@@ -54,7 +54,7 @@ TOKEN_LABELS = {
     "zai": "z.ai API Key",
     "zai_endpoint": "z.ai API Endpoint Type",
     "local_ollama": "Local Ollama API URL (e.g., http://localhost:11434/api/generate)",
-    "openai_compatible": "OpenAI-Compatible URL (e.g., http://example.com/v1/). Should end with /v1/",
+    "openai_compatible": "OpenAI-Compatible URL (e.g., http://example.com/v1/ or http://192.168.0.100:8084/v1/). Must end with /v1/",
 }
 
 DEFAULT_MODELS = {
