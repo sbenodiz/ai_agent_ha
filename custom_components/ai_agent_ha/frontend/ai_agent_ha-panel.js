@@ -702,10 +702,17 @@ class AiAgentHaPanel extends LitElement {
           entry => entry.domain === 'ai_agent_ha'
         );
 
+        console.debug("AI Agent HA config entries found:", aiAgentEntries.map(e => ({
+          title: e.title,
+          unique_id: e.unique_id,
+          ai_provider: e.data?.ai_provider
+        })));
+
         if (aiAgentEntries.length > 0) {
           const providers = aiAgentEntries
             .map(entry => {
               const provider = this._resolveProviderFromEntry(entry);
+              console.debug("Resolved provider for entry:", entry.title, "->", provider);
               if (!provider) return null;
 
               return {
@@ -1391,33 +1398,27 @@ class AiAgentHaPanel extends LitElement {
       }
     }
 
-    const titleMap = {
-      "ai agent ha (openrouter)": "openrouter",
-      "ai agent ha (google gemini)": "gemini",
-      "ai agent ha (openai)": "openai",
-      "ai agent ha (llama)": "llama",
-      "ai agent ha (anthropic (claude))": "anthropic",
-      "ai agent ha (alter)": "alter",
-      "ai agent ha (z.ai)": "zai",
-      "ai agent ha (local model)": "local",
-      "ai agent ha (local ollama)": "local_ollama",
-      "ai agent ha (openai-compatible)": "openai_compatible",
-    };
-
+    // Fallback: try to match from title (case-insensitive, partial match)
     if (entry.title) {
       const lowerTitle = entry.title.toLowerCase();
-      if (titleMap[lowerTitle]) {
-        return titleMap[lowerTitle];
-      }
 
-      const match = entry.title.match(/\(([^)]+)\)/);
-      if (match && match[1]) {
-        const normalized = match[1].toLowerCase().replace(/[^a-z0-9]/g, "");
-        const providerKey = Object.keys(PROVIDERS).find(
-          key => key.replace(/[^a-z0-9]/g, "") === normalized
-        );
-        if (providerKey) {
-          return providerKey;
+      // Direct keyword match for known providers
+      const keywordMap = [
+        { key: "openai_compatible", keywords: ["openai-compatible", "openai compatible"] },
+        { key: "local_ollama", keywords: ["local ollama", "ollama"] },
+        { key: "openrouter", keywords: ["openrouter"] },
+        { key: "gemini", keywords: ["google gemini", "gemini"] },
+        { key: "openai", keywords: ["openai"] },
+        { key: "llama", keywords: ["llama"] },
+        { key: "anthropic", keywords: ["anthropic", "claude"] },
+        { key: "alter", keywords: ["alter"] },
+        { key: "zai", keywords: ["z.ai"] },
+        { key: "local", keywords: ["local model"] },
+      ];
+
+      for (const { key, keywords } of keywordMap) {
+        if (PROVIDERS[key] && keywords.some(k => lowerTitle.includes(k))) {
+          return key;
         }
       }
     }
