@@ -12,7 +12,7 @@ ai_agent_ha:
   zai_token: "..."
   zai_endpoint: "general"  # or 'coding' for z.ai (3× usage, 1/7 cost)
   local_ollama_url: "http://localhost:11434/api/generate"  # Required for local_ollama provider
-  openai_compatible_url: "http://example.com/v1/"  # Required for openai_compatible provider (must end with /v1/)
+  openai_compatible_url: "http://example.com/v1/" or "http://localhost/v1/"  # (Url must end with /v1/)
   # Model configuration (optional, defaults will be used if not specified)
   models:
     openai: "gpt-3.5-turbo"  # or "gpt-4", "gpt-4-turbo", etc.
@@ -23,7 +23,7 @@ ai_agent_ha:
     alter: "your-model-name"  # model name for Alter API
     zai: "glm-4.7"  # model name for z.ai API (glm-4.7, glm-4.6, glm-4.5, etc.)
     local_ollama: "llama3.2"  # model name for local_ollama provider (optional if your API doesn't require it)
-    openai_compatible: "your-model-name"  # model name for your OpenAI-compatible endpoint
+    openai_compatible: "model unique-id or your-model-name"  # model name for your OpenAI-compatible endpoint
 """
 
 import asyncio

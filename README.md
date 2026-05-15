@@ -145,7 +145,7 @@ For detailed dashboard creation documentation, see: [Dashboard Creation Guide](d
 
 ### OpenAI-Compatible Endpoints
 - **Models**: Any model exposed by an OpenAI-compatible API (e.g., LM Studio, vLLM, llama-swap, etc.)
-- **Setup**: Provide your endpoint base URL ending with `/v1/` (e.g., `http://192.168.0.100:8084/v1/`)
+- **Setup**: Provide your endpoint base URL ending with `/v1/` (e.g., `http://localhost:8080/v1/`)
 
 ## 📦 Installation
 
@@ -241,9 +241,10 @@ ai_agent_ha:
 # Example with OpenAI-Compatible endpoint (e.g., LM Studio, llama-swap)
 ai_agent_ha:
   ai_provider: openai_compatible
-  openai_compatible_url: "http://192.168.0.100:8084/v1/"
+  openai_compatible_url: "http://localhost:8080/v1/"
   models:
     openai_compatible: "meta-llama/llama-3.1-8b-instruct"
+    llama-swap: "qwen3.6-27B-model-name-in-config"
 ```
 
 ## 🎮 Usage
@@ -395,7 +396,7 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 - All AI providers for their powerful APIs
 - Special thanks to @RmG152 for their valuable help with development
 - Contributors and testers who help improve this integration
-
+- Contributions from Trixanna for implementing additional Local-host Endpoints
 
 ---
 

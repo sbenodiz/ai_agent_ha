@@ -1143,7 +1143,7 @@ class AiAgentHaPanel extends LitElement {
       clearTimeout(this._serviceCallTimeout);
     }
 
-    // Set timeout to clear loading state after 60 seconds
+    // Set timeout to clear loading state after 10 minutes (for slower/local models)
     this._serviceCallTimeout = setTimeout(() => {
       if (this._isLoading) {
         console.warn("Service call timeout - clearing loading state");
@@ -1155,7 +1155,7 @@ class AiAgentHaPanel extends LitElement {
         }];
         this.requestUpdate();
       }
-    }, 60000); // 60 second timeout
+    }, 600000); // 10 minute timeout
 
     try {
       console.debug("Calling ai_agent_ha service");
