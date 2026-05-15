@@ -396,7 +396,7 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 - All AI providers for their powerful APIs
 - Special thanks to @RmG152 for their valuable help with development
 - Contributors and testers who help improve this integration
-- Contributions from Trixanna for implementing additional Local-host Endpoints
+- Contributions from @Trixanna for implementing additional Local-host Endpoints
 
 ---
 

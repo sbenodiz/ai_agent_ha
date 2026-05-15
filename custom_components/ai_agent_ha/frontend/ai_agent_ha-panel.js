@@ -15,6 +15,8 @@ const PROVIDERS = {
   alter: "Alter",
   zai: "z.ai",
   local: "Local Model",
+  local_ollama: "Local Ollama",
+  openai_compatible: "OpenAI-Compatible",
 };
 
 class AiAgentHaPanel extends LitElement {
@@ -1398,6 +1400,8 @@ class AiAgentHaPanel extends LitElement {
       "ai agent ha (alter)": "alter",
       "ai agent ha (z.ai)": "zai",
       "ai agent ha (local model)": "local",
+      "ai agent ha (local ollama)": "local_ollama",
+      "ai agent ha (openai-compatible)": "openai_compatible",
     };
 
     if (entry.title) {
