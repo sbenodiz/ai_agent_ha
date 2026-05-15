@@ -16,15 +16,29 @@ def _import_config_flow_directly():
         os.path.dirname(__file__), "..", "..", "custom_components", "ai_agent_ha", "config_flow.py"
     )
     config_flow_path = os.path.abspath(config_flow_path)
-    
+
     spec = importlib.util.spec_from_file_location("config_flow", config_flow_path)
     config_flow_module = importlib.util.module_from_spec(spec)
-    
-    # Mock dependencies before executing
-    sys.modules["homeassistant.helpers.config_validation"] = MagicMock()
-    sys.modules["voluptuous"] = MagicMock()
-    
-    spec.loader.exec_module(config_flow_module)
+
+    # Mocking voluptuous globally would leak into other tests and break any
+    # later import of real Home Assistant components (vol.Required would
+    # resolve to a MagicMock). Restore sys.modules after exec_module.
+    _SENTINEL = object()
+    mocked = {
+        "homeassistant.helpers.config_validation": MagicMock(),
+        "voluptuous": MagicMock(),
+    }
+    originals = {name: sys.modules.get(name, _SENTINEL) for name in mocked}
+    sys.modules.update(mocked)
+
+    try:
+        spec.loader.exec_module(config_flow_module)
+    finally:
+        for name, original in originals.items():
+            if original is _SENTINEL:
+                sys.modules.pop(name, None)
+            else:
+                sys.modules[name] = original
     return config_flow_module
 
 
