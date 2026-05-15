@@ -164,7 +164,9 @@ class LocalOllamaClient(BaseAIClient):
             payload["model"] = self.model
 
         # Note: Payloads don't contain auth tokens (those are in headers), but may contain user prompts
-        _LOGGER.debug("Local Ollama API request payload: %s", json.dumps(payload, indent=2))
+        _LOGGER.debug(
+            "Local Ollama API request payload: %s", json.dumps(payload, indent=2)
+        )
 
         # Ollama-specific validation
         if "model" not in payload or not payload["model"]:
@@ -186,7 +188,9 @@ class LocalOllamaClient(BaseAIClient):
             ) as resp:
                 if resp.status != 200:
                     error_text = await resp.text()
-                    _LOGGER.error("Local Ollama API error %d: %s", resp.status, error_text)
+                    _LOGGER.error(
+                        "Local Ollama API error %d: %s", resp.status, error_text
+                    )
 
                     # Provide more specific error messages for common Ollama issues
                     if resp.status == 404:
@@ -203,12 +207,15 @@ class LocalOllamaClient(BaseAIClient):
                             f"Bad request to local Ollama API. Error: {error_text}"
                         )
                     else:
-                        raise Exception(f"Local Ollama API error {resp.status}: {error_text}")
+                        raise Exception(
+                            f"Local Ollama API error {resp.status}: {error_text}"
+                        )
 
                 try:
                     response_text = await resp.text()
                     _LOGGER.debug(
-                        "Local Ollama API response (first 200 chars): %s", response_text[:200]
+                        "Local Ollama API response (first 200 chars): %s",
+                        response_text[:200],
                     )
                     _LOGGER.debug("Local Ollama API response status: %d", resp.status)
                     # Sanitize headers to avoid logging any auth tokens
@@ -445,8 +452,12 @@ class LocalOllamaClient(BaseAIClient):
                         return json.dumps(wrapped_response)
 
                 except Exception as e:
-                    _LOGGER.error("Failed to parse local Ollama API response: %s", str(e))
-                    raise Exception(f"Failed to parse local Ollama API response: {str(e)}")
+                    _LOGGER.error(
+                        "Failed to parse local Ollama API response: %s", str(e)
+                    )
+                    raise Exception(
+                        f"Failed to parse local Ollama API response: {str(e)}"
+                    )
 
 
 class OpenaiCompatibleClient(BaseAIClient):
@@ -509,9 +520,7 @@ class OpenaiCompatibleClient(BaseAIClient):
                 timeout=aiohttp.ClientTimeout(total=300),
             ) as resp:
                 response_text = await resp.text()
-                _LOGGER.debug(
-                    "OpenAI-compatible API response status: %d", resp.status
-                )
+                _LOGGER.debug("OpenAI-compatible API response status: %d", resp.status)
                 _LOGGER.debug(
                     "OpenAI-compatible API response (first 500 chars): %s",
                     response_text[:500],
@@ -1278,7 +1287,9 @@ class AiAgentHaAgent:
         # Set the appropriate system prompt based on provider
         if provider in ("local_ollama", "openai_compatible"):
             self.system_prompt = self.SYSTEM_PROMPT_LOCAL
-            _LOGGER.debug("Using local-optimized system prompt for provider: %s", provider)
+            _LOGGER.debug(
+                "Using local-optimized system prompt for provider: %s", provider
+            )
         else:
             self.system_prompt = self.SYSTEM_PROMPT
             _LOGGER.debug("Using standard system prompt")
@@ -1309,15 +1320,21 @@ class AiAgentHaAgent:
             model = models_config.get("local_ollama") or models_config.get("local", "")
             if not url:
                 _LOGGER.error("Missing local_ollama_url for local_ollama provider")
-                raise Exception("Missing local_ollama_url configuration for local_ollama provider")
+                raise Exception(
+                    "Missing local_ollama_url configuration for local_ollama provider"
+                )
             self.ai_client = LocalOllamaClient(url, model)
         elif provider == "openai_compatible":
             url = config.get("openai_compatible_url")
             model = models_config.get("openai_compatible", "")
             api_key = config.get("openai_compatible_api_key", "") or ""
             if not url:
-                _LOGGER.error("Missing openai_compatible_url for openai_compatible provider")
-                raise Exception("Missing openai_compatible_url configuration for openai_compatible provider")
+                _LOGGER.error(
+                    "Missing openai_compatible_url for openai_compatible provider"
+                )
+                raise Exception(
+                    "Missing openai_compatible_url configuration for openai_compatible provider"
+                )
             self.ai_client = OpenaiCompatibleClient(url, model, api_key or None)
         else:  # default to llama if somehow specified
             model = models_config.get("llama", "Llama-4-Maverick-17B-128E-Instruct-FP8")
@@ -2800,7 +2817,10 @@ Then restart Home Assistant to see your new dashboard in the sidebar."""
 
             # Validate token/URL
             if not token:
-                is_url_provider = selected_provider in ("local_ollama", "openai_compatible")
+                is_url_provider = selected_provider in (
+                    "local_ollama",
+                    "openai_compatible",
+                )
                 error_msg = f"No {'URL' if is_url_provider else 'token'} configured for provider {selected_provider}"
                 _LOGGER.error(error_msg)
                 return _with_debug({"success": False, "error": error_msg})

@@ -251,7 +251,12 @@ class AiAgentHaConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):  # type: ig
                     self.config_data["models"][provider] = selected_model
                 else:
                     # For local_ollama, openai_compatible, alter, and zai providers, allow empty model name
-                    if provider in ("local_ollama", "openai_compatible", "alter", "zai"):
+                    if provider in (
+                        "local_ollama",
+                        "openai_compatible",
+                        "alter",
+                        "zai",
+                    ):
                         self.config_data["models"][provider] = ""
                     else:
                         # Fallback to default model for other providers
@@ -505,7 +510,12 @@ class AiAgentHaOptionsFlowHandler(config_entries.OptionsFlow):
                         updated_data["models"][provider] = selected_model
                     else:
                         # For local_ollama, openai_compatible, alter, and zai providers, allow empty model name
-                        if provider in ("local_ollama", "openai_compatible", "alter", "zai"):
+                        if provider in (
+                            "local_ollama",
+                            "openai_compatible",
+                            "alter",
+                            "zai",
+                        ):
                             updated_data["models"][provider] = ""
                         else:
                             # Ensure we keep the current model or use default for other providers
@@ -602,9 +612,9 @@ class AiAgentHaOptionsFlowHandler(config_entries.OptionsFlow):
             current_url = self.config_entry.data.get(CONF_OPENAI_COMPATIBLE_URL, "")
 
             schema_dict = {
-                vol.Required(CONF_OPENAI_COMPATIBLE_URL, default=current_url): TextSelector(
-                    TextSelectorConfig(type="text")
-                ),
+                vol.Required(
+                    CONF_OPENAI_COMPATIBLE_URL, default=current_url
+                ): TextSelector(TextSelectorConfig(type="text")),
             }
 
             # Add model selection (typically custom)
