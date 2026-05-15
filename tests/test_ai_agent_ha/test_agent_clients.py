@@ -11,31 +11,31 @@ import os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
 
-class TestLocalClient:
-    """Test Local AI client functionality."""
+class TestLocalOllamaClient:
+    """Test Local Ollama AI client functionality."""
 
-    def test_local_client_initialization(self):
-        """Test LocalClient initialization."""
+    def test_local_ollama_client_initialization(self):
+        """Test LocalOllamaClient initialization."""
         try:
-            from custom_components.ai_agent_ha.agent import LocalClient
+            from custom_components.ai_agent_ha.agent import LocalOllamaClient
             
-            client = LocalClient("http://localhost:11434/api/generate", "llama3.2")
+            client = LocalOllamaClient("http://localhost:11434/api/generate", "llama3.2")
             assert client.url == "http://localhost:11434/api/generate"
             assert client.model == "llama3.2"
             
             # Test without model
-            client_no_model = LocalClient("http://localhost:11434/api/generate")
+            client_no_model = LocalOllamaClient("http://localhost:11434/api/generate")
             assert client_no_model.model == ""
         except ImportError:
-            pytest.skip("LocalClient not available")
+            pytest.skip("LocalOllamaClient not available")
 
     @pytest.mark.asyncio
-    async def test_local_client_get_response_success(self):
-        """Test LocalClient successful response."""
+    async def test_local_ollama_client_get_response_success(self):
+        """Test LocalOllamaClient successful response."""
         try:
-            from custom_components.ai_agent_ha.agent import LocalClient
+            from custom_components.ai_agent_ha.agent import LocalOllamaClient
             
-            client = LocalClient("http://localhost:11434/api/generate", "test-model")
+            client = LocalOllamaClient("http://localhost:11434/api/generate", "test-model")
             
             mock_response = {
                 "response": "Test response from local model",
@@ -52,7 +52,38 @@ class TestLocalClient:
             # The actual HTTP functionality is tested in integration tests
             
         except ImportError:
-            pytest.skip("LocalClient not available")
+            pytest.skip("LocalOllamaClient not available")
+
+
+class TestOpenaiCompatibleClient:
+    """Test OpenAI-compatible client functionality."""
+
+    def test_openai_compatible_client_initialization(self):
+        """Test OpenaiCompatibleClient initialization."""
+        try:
+            from custom_components.ai_agent_ha.agent import OpenaiCompatibleClient
+
+            client = OpenaiCompatibleClient("http://127.0.0.1:8080/v1/", "my-model")
+            assert client.base_url == "http://127.0.0.1:8080/v1"
+            assert client.api_url == "http://127.0.0.1:8080/v1/chat/completions"
+            assert client.model == "my-model"
+
+            # Test with trailing slash
+            client2 = OpenaiCompatibleClient("http://127.0.0.1:8080/v1//", "my-model")
+            assert client2.api_url == "http://127.0.0.1:8080/v1/chat/completions"
+        except ImportError:
+            pytest.skip("OpenaiCompatibleClient not available")
+
+    def test_openai_compatible_client_no_url(self):
+        """Test OpenaiCompatibleClient fails without URL."""
+        try:
+            from custom_components.ai_agent_ha.agent import OpenaiCompatibleClient
+
+            with pytest.raises(Exception) as exc_info:
+                OpenaiCompatibleClient("")
+            assert "openai_compatible_url is required" in str(exc_info.value)
+        except ImportError:
+            pytest.skip("OpenaiCompatibleClient not available")
 
 
 class TestOpenAIClient:

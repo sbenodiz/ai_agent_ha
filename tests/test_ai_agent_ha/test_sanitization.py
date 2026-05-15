@@ -243,7 +243,9 @@ class TestSanitization:
             "anthropic_token": "sk-ant-789",
             "openrouter_token": "or-token-123",
             "llama_token": "llama-token-456",
-            "local_url": "http://localhost:11434",
+            "local_ollama_url": "http://localhost:11434",
+            "openai_compatible_url": "http://127.0.0.1:8080/v1/",
+            "local_url": "http://localhost:11434",  # legacy
             "models": {
                 "openai": "gpt-4",
                 "gemini": "gemini-pro",
@@ -261,6 +263,8 @@ class TestSanitization:
 
         # Non-sensitive values should remain
         assert result["ai_provider"] == "openai"
+        assert result["local_ollama_url"] == "http://localhost:11434"
+        assert result["openai_compatible_url"] == "http://127.0.0.1:8080/v1/"
         assert result["local_url"] == "http://localhost:11434"
         assert result["models"]["openai"] == "gpt-4"
         assert result["models"]["gemini"] == "gemini-pro"

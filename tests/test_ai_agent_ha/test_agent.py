@@ -84,7 +84,8 @@ class TestAIAgent:
             "google",
             "openrouter",
             "llama",
-            "local",
+            "local_ollama",
+            "openai_compatible",
         ]
         assert "openai_token" in mock_agent_config
         assert len(mock_agent_config["openai_token"]) > 0
@@ -117,7 +118,8 @@ class TestAIAgent:
                 "gemini",
                 "openrouter",
                 "anthropic",
-                "local",
+                "local_ollama",
+                "openai_compatible",
             ]
 
         expected_providers = [
@@ -126,7 +128,8 @@ class TestAIAgent:
             "gemini",
             "openrouter",
             "anthropic",
-            "local",
+            "local_ollama",
+            "openai_compatible",
         ]
         assert all(provider in AI_PROVIDERS for provider in expected_providers)
 

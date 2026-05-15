@@ -15,6 +15,8 @@ const PROVIDERS = {
   alter: "Alter",
   zai: "z.ai",
   local: "Local Model",
+  local_ollama: "Local Ollama",
+  openai_compatible: "OpenAI-Compatible",
 };
 
 class AiAgentHaPanel extends LitElement {
@@ -715,8 +717,6 @@ class AiAgentHaPanel extends LitElement {
 
           this._availableProviders = providers;
 
-          console.debug("Available AI providers (mapped from data/title):", this._availableProviders);
-
           if (
             (!this._selectedProvider || !providers.find(p => p.value === this._selectedProvider)) &&
             providers.length > 0
@@ -1143,7 +1143,7 @@ class AiAgentHaPanel extends LitElement {
       clearTimeout(this._serviceCallTimeout);
     }
 
-    // Set timeout to clear loading state after 60 seconds
+    // Set timeout to clear loading state after 10 minutes (for slower/local models)
     this._serviceCallTimeout = setTimeout(() => {
       if (this._isLoading) {
         console.warn("Service call timeout - clearing loading state");
@@ -1155,7 +1155,7 @@ class AiAgentHaPanel extends LitElement {
         }];
         this.requestUpdate();
       }
-    }, 60000); // 60 second timeout
+    }, 600000); // 10 minute timeout
 
     try {
       console.debug("Calling ai_agent_ha service");
@@ -1389,31 +1389,27 @@ class AiAgentHaPanel extends LitElement {
       }
     }
 
-    const titleMap = {
-      "ai agent ha (openrouter)": "openrouter",
-      "ai agent ha (google gemini)": "gemini",
-      "ai agent ha (openai)": "openai",
-      "ai agent ha (llama)": "llama",
-      "ai agent ha (anthropic (claude))": "anthropic",
-      "ai agent ha (alter)": "alter",
-      "ai agent ha (z.ai)": "zai",
-      "ai agent ha (local model)": "local",
-    };
-
+    // Fallback: try to match from title (case-insensitive, partial match)
     if (entry.title) {
       const lowerTitle = entry.title.toLowerCase();
-      if (titleMap[lowerTitle]) {
-        return titleMap[lowerTitle];
-      }
 
-      const match = entry.title.match(/\(([^)]+)\)/);
-      if (match && match[1]) {
-        const normalized = match[1].toLowerCase().replace(/[^a-z0-9]/g, "");
-        const providerKey = Object.keys(PROVIDERS).find(
-          key => key.replace(/[^a-z0-9]/g, "") === normalized
-        );
-        if (providerKey) {
-          return providerKey;
+      // Direct keyword match for known providers
+      const keywordMap = [
+        { key: "openai_compatible", keywords: ["openai-compatible", "openai compatible"] },
+        { key: "local_ollama", keywords: ["local ollama", "ollama"] },
+        { key: "openrouter", keywords: ["openrouter"] },
+        { key: "gemini", keywords: ["google gemini", "gemini"] },
+        { key: "openai", keywords: ["openai"] },
+        { key: "llama", keywords: ["llama"] },
+        { key: "anthropic", keywords: ["anthropic", "claude"] },
+        { key: "alter", keywords: ["alter"] },
+        { key: "zai", keywords: ["z.ai"] },
+        { key: "local", keywords: ["local model"] },
+      ];
+
+      for (const { key, keywords } of keywordMap) {
+        if (PROVIDERS[key] && keywords.some(k => lowerTitle.includes(k))) {
+          return key;
         }
       }
     }

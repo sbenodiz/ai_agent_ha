@@ -54,7 +54,8 @@ class TestConfigFlowComprehensive:
                 'async_step_gemini',
                 'async_step_llama',
                 'async_step_openrouter',
-                'async_step_local'
+                'async_step_local_ollama',
+                'async_step_openai_compatible'
             ]
             
             for method in required_methods:
@@ -75,7 +76,7 @@ class TestConfigFlowComprehensive:
             assert isinstance(AI_PROVIDERS, list)
             assert len(AI_PROVIDERS) > 0
             
-            expected_providers = ["llama", "openai", "gemini", "openrouter", "anthropic", "local"]
+            expected_providers = ["llama", "openai", "gemini", "openrouter", "anthropic", "local_ollama", "openai_compatible"]
             for provider in expected_providers:
                 assert provider in AI_PROVIDERS
                 
@@ -94,7 +95,8 @@ class TestConfigFlowComprehensive:
             assert hasattr(config_flow_module, 'STEP_GEMINI_DATA_SCHEMA')
             assert hasattr(config_flow_module, 'STEP_LLAMA_DATA_SCHEMA')
             assert hasattr(config_flow_module, 'STEP_OPENROUTER_DATA_SCHEMA')
-            assert hasattr(config_flow_module, 'STEP_LOCAL_DATA_SCHEMA')
+            assert hasattr(config_flow_module, 'STEP_LOCAL_OLLAMA_DATA_SCHEMA')
+            assert hasattr(config_flow_module, 'STEP_OPENAI_COMPATIBLE_DATA_SCHEMA')
             
         except Exception as e:
             pytest.skip(f"Config flow schema test failed: {e}")
@@ -124,7 +126,8 @@ class TestConfigFlowComprehensive:
                 'STEP_GEMINI_DATA_SCHEMA',
                 'STEP_LLAMA_DATA_SCHEMA',
                 'STEP_OPENROUTER_DATA_SCHEMA',
-                'STEP_LOCAL_DATA_SCHEMA'
+                'STEP_LOCAL_OLLAMA_DATA_SCHEMA',
+                'STEP_OPENAI_COMPATIBLE_DATA_SCHEMA'
             ]
             
             for schema_name in schemas:
@@ -145,7 +148,8 @@ class TestConfigFlowComprehensive:
                 "gemini": "Google Gemini",
                 "openrouter": "OpenRouter",
                 "anthropic": "Anthropic",
-                "local": "Local Model"
+                "local_ollama": "Local Ollama",
+                "openai_compatible": "OpenAI-Compatible"
             }
             
             for provider_key, provider_name in expected_providers.items():
@@ -166,7 +170,8 @@ class TestConfigFlowComprehensive:
                 "gemini": "async_step_gemini",
                 "llama": "async_step_llama",
                 "openrouter": "async_step_openrouter",
-                "local": "async_step_local"
+                "local_ollama": "async_step_local_ollama",
+                "openai_compatible": "async_step_openai_compatible"
             }
             
             for provider, step_method in provider_steps.items():

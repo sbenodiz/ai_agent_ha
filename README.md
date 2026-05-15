@@ -139,6 +139,14 @@ For detailed dashboard creation documentation, see: [Dashboard Creation Guide](d
   - `glm-4.7` (Latest flagship model)
   - `glm-4.5-flash` (Fast and efficient)
 
+### Local Ollama
+- **Models**: Any Ollama model (e.g., llama3.2, mistral, mixtral, etc.)
+- **Setup**: Run Ollama locally and provide its API URL (e.g., `http://localhost:11434/api/generate`)
+
+### OpenAI-Compatible Endpoints
+- **Models**: Any model exposed by an OpenAI-compatible API (e.g., LM Studio, vLLM, llama-swap, etc.)
+- **Setup**: Provide your endpoint base URL ending with `/v1/` (e.g., `http://localhost:8080/v1/`)
+
 ## 📦 Installation
 
 ### HACS Installation (Recommended)
@@ -182,7 +190,8 @@ Select your preferred AI provider from the dropdown:
 - Alter
 - z.ai
 - Llama
-- Local Model
+- Local Ollama
+- OpenAI-Compatible Endpoints
 
 ### Step 2: Configure Provider
 Enter your API credentials and optionally select a model:
@@ -219,6 +228,25 @@ ai_agent_ha:
     alter: "your-model-name"
 ```
 
+```yaml
+# Example with Local Ollama provider
+ai_agent_ha:
+  ai_provider: local_ollama
+  local_ollama_url: "http://localhost:11434/api/generate"
+  models:
+    local_ollama: "llama3.2"
+```
+
+```yaml
+# Example with OpenAI-Compatible endpoint (e.g., LM Studio, llama-swap)
+ai_agent_ha:
+  ai_provider: openai_compatible
+  openai_compatible_url: "http://localhost:8080/v1/"
+  models:
+    openai_compatible: "meta-llama/llama-3.1-8b-instruct"
+    llama-swap: "qwen3.6-27B-model-name-in-config"
+```
+
 ## 🎮 Usage
 
 ### Chat Interface
@@ -239,6 +267,8 @@ Enter any model name in the "Custom Model" field:
 - Alter: `your-custom-model-name`
 - z.ai: `glm-4.7`
 - Llama: `Llama-4-Maverick-17B-128E-Instruct-FP8`
+- Local Ollama: `llama3.2` or any model installed in Ollama
+- OpenAI-Compatible: any model name accepted by your endpoint
 
 ### Automation Creation
 The AI can create automations automatically:
@@ -322,7 +352,7 @@ All workflows run automatically on push and pull requests using Python 3.12 to e
 
 ### API Structure
 The integration provides these main components:
-- **AI Clients**: Modular providers (OpenAI, Gemini, Anthropic (Claude), OpenRouter, Alter, z.ai, Llama, Local)
+- **AI Clients**: Modular providers (OpenAI, Gemini, Anthropic (Claude), OpenRouter, Alter, z.ai, Llama, Local Ollama, OpenAI-Compatible)
 - **Agent**: Core logic for processing requests
 - **Config Flow**: Setup and options management
 - **Frontend**: Chat interface
@@ -366,6 +396,7 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 - All AI providers for their powerful APIs
 - Special thanks to @RmG152 for their valuable help with development
 - Contributors and testers who help improve this integration
+- Contributions from @Trixanna for implementing additional Local-host Endpoints
 
 ---
 
