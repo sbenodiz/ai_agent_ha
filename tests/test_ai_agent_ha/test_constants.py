@@ -67,7 +67,8 @@ def test_ai_providers_defined():
         "gemini",
         "llama",
         "openrouter",
-        "local",
+        "local_ollama",
+        "openai_compatible",
     ]
     for provider in expected_providers:
         assert provider in const_module.AI_PROVIDERS, f"Provider {provider} not found"

@@ -15,7 +15,7 @@ from homeassistant.helpers.selector import (
     TextSelectorConfig,
 )
 
-from .const import CONF_LOCAL_MODEL, CONF_LOCAL_URL, DOMAIN
+from .const import CONF_LOCAL_OLLAMA_URL, CONF_OPENAI_COMPATIBLE_URL, DOMAIN
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -27,7 +27,8 @@ PROVIDERS = {
     "anthropic": "Anthropic (Claude)",
     "alter": "Alter",
     "zai": "z.ai",
-    "local": "Local Model",
+    "local_ollama": "Local Ollama",
+    "openai_compatible": "OpenAI-Compatible (e.g. LM Studio, vLLM)",
 }
 
 TOKEN_FIELD_NAMES = {
@@ -39,7 +40,8 @@ TOKEN_FIELD_NAMES = {
     "alter": "alter_token",
     "zai": "zai_token",
     "zai_endpoint": "zai_endpoint",
-    "local": CONF_LOCAL_URL,  # For local models, we use URL instead of token
+    "local_ollama": CONF_LOCAL_OLLAMA_URL,  # For local Ollama models, we use URL instead of token
+    "openai_compatible": CONF_OPENAI_COMPATIBLE_URL,  # For OpenAI-compatible endpoints
 }
 
 TOKEN_LABELS = {
@@ -51,7 +53,8 @@ TOKEN_LABELS = {
     "alter": "Alter API Key",
     "zai": "z.ai API Key",
     "zai_endpoint": "z.ai API Endpoint Type",
-    "local": "Local API URL (e.g., http://localhost:11434/api/generate)",
+    "local_ollama": "Local Ollama API URL (e.g., http://localhost:11434/api/generate)",
+    "openai_compatible": "OpenAI-Compatible URL (e.g., http://example.com/v1/). Should end with /v1/",
 }
 
 DEFAULT_MODELS = {
@@ -62,7 +65,8 @@ DEFAULT_MODELS = {
     "anthropic": "claude-sonnet-4-5-20250929",
     "alter": "",  # User enters custom model
     "zai": "glm-4.7",  # Z.ai's latest flagship model
-    "local": "llama3.2",  # Updated to use llama3.2 as default
+    "local_ollama": "llama3.2",  # Updated to use llama3.2 as default for local Ollama
+    "openai_compatible": "",  # User enters custom model for OpenAI-compatible endpoint
 }
 
 AVAILABLE_MODELS = {
@@ -137,14 +141,18 @@ AVAILABLE_MODELS = {
         "glm-4-32b-0414-128k",
         "Custom...",
     ],
-    # For local models, provide common Ollama models with llama3.2 as the default
-    "local": [
+    # For local Ollama models, provide common models with llama3.2 as the default
+    "local_ollama": [
         "llama3.2",
         "llama3",
         "llama3.1",
         "mistral",
         "mixtral",
         "deepseek-coder",
+        "Custom...",
+    ],
+    # For OpenAI-compatible endpoints, user should specify their model
+    "openai_compatible": [
         "Custom...",
     ],
 }
@@ -242,8 +250,8 @@ class AiAgentHaConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):  # type: ig
                     # Use selected model if it's not the "Custom..." option
                     self.config_data["models"][provider] = selected_model
                 else:
-                    # For local and alter providers, allow empty model name
-                    if provider in ("local", "alter", "zai"):
+                    # For local_ollama, openai_compatible, alter, and zai providers, allow empty model name
+                    if provider in ("local_ollama", "openai_compatible", "alter", "zai"):
                         self.config_data["models"][provider] = ""
                     else:
                         # Fallback to default model for other providers
@@ -292,16 +300,16 @@ class AiAgentHaConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):  # type: ig
                 },
             )
 
-        if provider == "local":
-            # For local provider, we need both URL and optional model name
+        if provider == "local_ollama":
+            # For local_ollama provider, we need both URL and optional model name
             schema_dict = {
-                vol.Required(CONF_LOCAL_URL): TextSelector(
+                vol.Required(CONF_LOCAL_OLLAMA_URL): TextSelector(
                     TextSelectorConfig(type="text")
                 ),
             }
 
             # Add model selection
-            model_options = AVAILABLE_MODELS.get("local", ["Custom..."])
+            model_options = AVAILABLE_MODELS.get("local_ollama", ["Custom..."])
             schema_dict[vol.Optional("model", default="Custom...")] = SelectSelector(
                 SelectSelectorConfig(options=model_options)
             )
@@ -314,7 +322,34 @@ class AiAgentHaConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):  # type: ig
                 data_schema=vol.Schema(schema_dict),
                 errors=errors,
                 description_placeholders={
-                    "token_label": "Local API URL",  # nosec B105 - UI label string shown next to the URL field, not a credential
+                    "token_label": "Local Ollama API URL",  # nosec B105 - UI label string shown next to the URL field, not a credential
+                    "provider": PROVIDERS[provider],
+                },
+            )
+
+        if provider == "openai_compatible":
+            # For openai_compatible provider, we need base URL and optional model name
+            schema_dict = {
+                vol.Required(CONF_OPENAI_COMPATIBLE_URL): TextSelector(
+                    TextSelectorConfig(type="text")
+                ),
+            }
+
+            # Add model selection (typically custom)
+            model_options = AVAILABLE_MODELS.get("openai_compatible", ["Custom..."])
+            schema_dict[vol.Optional("model", default="Custom...")] = SelectSelector(
+                SelectSelectorConfig(options=model_options)
+            )
+            schema_dict[vol.Optional("custom_model")] = TextSelector(
+                TextSelectorConfig(type="text")
+            )
+
+            return self.async_show_form(
+                step_id="configure",
+                data_schema=vol.Schema(schema_dict),
+                errors=errors,
+                description_placeholders={
+                    "token_label": "OpenAI-Compatible URL",
                     "provider": PROVIDERS[provider],
                 },
             )
@@ -469,8 +504,8 @@ class AiAgentHaOptionsFlowHandler(config_entries.OptionsFlow):
                         # Use selected model if it's not the "Custom..." option
                         updated_data["models"][provider] = selected_model
                     else:
-                        # For local, alter, and zai providers, allow empty model name
-                        if provider in ("local", "alter", "zai"):
+                        # For local_ollama, openai_compatible, alter, and zai providers, allow empty model name
+                        if provider in ("local_ollama", "openai_compatible", "alter", "zai"):
                             updated_data["models"][provider] = ""
                         else:
                             # Ensure we keep the current model or use default for other providers
@@ -530,18 +565,18 @@ class AiAgentHaOptionsFlowHandler(config_entries.OptionsFlow):
                 },
             )
 
-        if provider == "local":
-            # For local provider, we need both URL and optional model name
-            current_url = self.config_entry.data.get(CONF_LOCAL_URL, "")
+        if provider == "local_ollama":
+            # For local_ollama provider, we need both URL and optional model name
+            current_url = self.config_entry.data.get(CONF_LOCAL_OLLAMA_URL, "")
 
             schema_dict = {
-                vol.Required(CONF_LOCAL_URL, default=current_url): TextSelector(
+                vol.Required(CONF_LOCAL_OLLAMA_URL, default=current_url): TextSelector(
                     TextSelectorConfig(type="text")
                 ),
             }
 
             # Add model selection
-            model_options = AVAILABLE_MODELS.get("local", ["Custom..."])
+            model_options = AVAILABLE_MODELS.get("local_ollama", ["Custom..."])
             # Ensure "Custom..." is in model options
             if "Custom..." not in model_options:
                 model_options = model_options + ["Custom..."]
@@ -557,7 +592,39 @@ class AiAgentHaOptionsFlowHandler(config_entries.OptionsFlow):
                 data_schema=vol.Schema(schema_dict),
                 errors=errors,
                 description_placeholders={
-                    "token_label": "Local API URL",  # nosec B105 - UI label string shown next to the URL field, not a credential
+                    "token_label": "Local Ollama API URL",  # nosec B105 - UI label string shown next to the URL field, not a credential
+                    "provider": PROVIDERS[provider],
+                },
+            )
+
+        if provider == "openai_compatible":
+            # For openai_compatible provider, we need URL and optional model name
+            current_url = self.config_entry.data.get(CONF_OPENAI_COMPATIBLE_URL, "")
+
+            schema_dict = {
+                vol.Required(CONF_OPENAI_COMPATIBLE_URL, default=current_url): TextSelector(
+                    TextSelectorConfig(type="text")
+                ),
+            }
+
+            # Add model selection (typically custom)
+            model_options = AVAILABLE_MODELS.get("openai_compatible", ["Custom..."])
+            # Ensure "Custom..." is in model options
+            if "Custom..." not in model_options:
+                model_options = model_options + ["Custom..."]
+            schema_dict[vol.Optional("model", default=model_default)] = SelectSelector(
+                SelectSelectorConfig(options=model_options)
+            )
+            schema_dict[vol.Optional("custom_model", default=custom_model_default)] = (
+                TextSelector(TextSelectorConfig(type="text"))
+            )
+
+            return self.async_show_form(
+                step_id="configure_options",
+                data_schema=vol.Schema(schema_dict),
+                errors=errors,
+                description_placeholders={
+                    "token_label": "OpenAI-Compatible URL",
                     "provider": PROVIDERS[provider],
                 },
             )
