@@ -702,17 +702,10 @@ class AiAgentHaPanel extends LitElement {
           entry => entry.domain === 'ai_agent_ha'
         );
 
-        console.debug("AI Agent HA config entries found:", aiAgentEntries.map(e => ({
-          title: e.title,
-          unique_id: e.unique_id,
-          ai_provider: e.data?.ai_provider
-        })));
-
         if (aiAgentEntries.length > 0) {
           const providers = aiAgentEntries
             .map(entry => {
               const provider = this._resolveProviderFromEntry(entry);
-              console.debug("Resolved provider for entry:", entry.title, "->", provider);
               if (!provider) return null;
 
               return {
@@ -723,8 +716,6 @@ class AiAgentHaPanel extends LitElement {
             .filter(Boolean);
 
           this._availableProviders = providers;
-
-          console.debug("Available AI providers (mapped from data/title):", this._availableProviders);
 
           if (
             (!this._selectedProvider || !providers.find(p => p.value === this._selectedProvider)) &&
