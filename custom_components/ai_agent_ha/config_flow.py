@@ -354,7 +354,7 @@ class AiAgentHaConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):  # type: ig
                 data_schema=vol.Schema(schema_dict),
                 errors=errors,
                 description_placeholders={
-                    "token_label": "OpenAI-Compatible URL",
+                    "token_label": "OpenAI-Compatible URL",  # nosec B105 - UI label for config form, not a credential
                     "provider": PROVIDERS[provider],
                 },
             )
@@ -634,7 +634,7 @@ class AiAgentHaOptionsFlowHandler(config_entries.OptionsFlow):
                 data_schema=vol.Schema(schema_dict),
                 errors=errors,
                 description_placeholders={
-                    "token_label": "OpenAI-Compatible URL",
+                    "token_label": "OpenAI-Compatible URL",  # nosec B105 - UI label for config form, not a credential
                     "provider": PROVIDERS[provider],
                 },
             )
