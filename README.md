@@ -98,19 +98,25 @@ For detailed dashboard creation documentation, see: [Dashboard Creation Guide](d
 ## 🚀 Supported AI Providers
 
 ### OpenAI
-- **Models**: GPT-3.5 Turbo, GPT-4, GPT-4 Turbo, GPT-4o, GPT-5, O1-Preview, O1-Mini
+- **Models**: All available models are loaded dynamically.
 - **Setup**: Get API key from [OpenAI Platform](https://platform.openai.com/api-keys)
+- During configuration, you can optionally set a custom Base URL (e.g.,    
+ for proxies or regional endpoints). Leave it blank to use the official default.      
+- __Note__ If you need a model not listed, select “Custom...” and type the exact model ID.                                                                            
 
 ### Google Gemini
-- **Models**: Gemini 1.5 Flash, Gemini 1.5 Pro, Gemini 1.0 Pro, Gemini 2.0 Flash Exp
+- **Models**: All available models are loaded dynamically.
 - **Setup**: Get API key from [Google AI Studio](https://aistudio.google.com/app/apikey)
+- **Note**: If you need a model not listed, select “Custom...” and type the exact model ID.
 
 ### Anthropic (Claude)
-- **Models**: Claude 3.5 Sonnet, Claude 3.5 Haiku, Claude 3 Opus, Claude 3 Sonnet, Claude 3 Haiku
+- **Models**: Claude Opus 4.7, Claude Sonnet 4.6, Claude Haiku 4.5, Claude 3.5 Sonnet, Claude 3.5 Haiku, Claude 3 Opus, Claude 3 Sonnet, Claude 3 Haiku
 - **Setup**: Get API key from [Anthropic Console](https://docs.anthropic.com/en/docs/get-started)
 - **Popular Models**:
-  - `claude-3-5-sonnet-20241022` (Latest and most capable)
-  - `claude-3-5-haiku-20241022` (Fast and efficient)
+  - `claude-opus-4-7` (Latest flagship model)
+  - `claude-sonnet-4-6` (Latest sonnet model)
+  - `claude-haiku-4-5` (Fast and efficient)
+  - `claude-3-5-sonnet-20241022` (Previous generation)
   - `claude-3-opus-20240229` (Most powerful for complex tasks)
 
 ### OpenRouter
@@ -143,9 +149,10 @@ For detailed dashboard creation documentation, see: [Dashboard Creation Guide](d
 - **Models**: Any Ollama model (e.g., llama3.2, mistral, mixtral, etc.)
 - **Setup**: Run Ollama locally and provide its API URL (e.g., `http://localhost:11434/api/generate`)
 
-### OpenAI-Compatible Endpoints
-- **Models**: Any model exposed by an OpenAI-compatible API (e.g., LM Studio, vLLM, llama-swap, etc.)
+### Local OpenAI-Compatible Endpoints
+- **Models**: All available models are loaded dynamically from your endpoint (if supported). Falls back to “Custom...” if not.
 - **Setup**: Provide your endpoint base URL ending with `/v1/` (e.g., `http://localhost:8080/v1/`)
+- **Note**: If you need a model not listed, select “Custom...” and type the exact model ID.
 
 ## 📦 Installation
 

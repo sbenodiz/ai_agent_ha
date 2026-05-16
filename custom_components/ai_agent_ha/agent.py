@@ -40,7 +40,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.storage import Store
 from homeassistant.util import dt as dt_util
 
-from .const import CONF_WEATHER_ENTITY, DOMAIN
+from .const import CONF_OPENAI_BASE_URL, CONF_WEATHER_ENTITY, DOMAIN
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -610,11 +610,188 @@ class LlamaClient(BaseAIClient):
                 return content.get("text", str(data))
 
 
+async def fetch_openai_models(base_url, api_key, timeout=10):
+    """Fetch available OpenAI models dynamically.
+
+    Returns a list of model IDs suitable for chat (gpt-*, o*). On failure,
+    returns a small safe fallback list.
+    """
+    if not base_url:
+        base_url = "https://api.openai.com/v1"
+    url = f"{base_url.rstrip('/')}/models"
+
+    fallback_models = [
+        "gpt-4.1-mini",
+        "gpt-4o-mini",
+        "o4-mini",
+    ]
+
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(
+                url,
+                headers={"Authorization": f"Bearer {api_key}"},
+                timeout=aiohttp.ClientTimeout(total=timeout),
+            ) as resp:
+                if resp.status != 200:
+                    _LOGGER.warning(
+                        "Failed to fetch OpenAI models (status=%d), using fallback list",
+                        resp.status,
+                    )
+                    return fallback_models
+
+                data = await resp.json()
+                models = data.get("data", [])
+                if not isinstance(models, list):
+                    return fallback_models
+
+                # Filter likely chat-capable models
+                chat_models = []
+                for m in models:
+                    mid = m.get("id", "")
+                    if isinstance(mid, str) and (
+                        mid.startswith("gpt-") or mid.startswith("o")
+                    ):
+                        chat_models.append(mid)
+
+                if not chat_models:
+                    return fallback_models
+
+                chat_models.sort()
+                _LOGGER.debug("Fetched %d OpenAI chat models", len(chat_models))
+                return chat_models
+
+    except Exception as e:
+        _LOGGER.warning("Error fetching OpenAI models, using fallback list: %s", e)
+        return fallback_models
+
+
+async def fetch_gemini_models(api_key, timeout=10):
+    """Fetch available Gemini models dynamically.
+
+    Returns a list of model IDs suitable for chat. On failure,
+    returns a small safe fallback list.
+    """
+    if not api_key:
+        return [
+            "gemini-2.5-flash",
+            "gemini-2.5-pro",
+        ]
+
+    url = f"https://generativelanguage.googleapis.com/v1beta/models?key={api_key}"
+
+    fallback_models = [
+        "gemini-2.5-flash",
+        "gemini-2.5-pro",
+    ]
+
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(
+                url,
+                timeout=aiohttp.ClientTimeout(total=timeout),
+            ) as resp:
+                if resp.status != 200:
+                    _LOGGER.warning(
+                        "Failed to fetch Gemini models (status=%d), using fallback list",
+                        resp.status,
+                    )
+                    return fallback_models
+
+                data = await resp.json()
+                models = data.get("models", [])
+                if not isinstance(models, list):
+                    return fallback_models
+
+                # Filter likely chat-capable models
+                chat_models = []
+                for m in models:
+                    mid = m.get("name", "")
+                    if isinstance(mid, str) and "gemini" in mid.lower():
+                        # Extract model ID from name like "models/gemini-2.5-flash"
+                        model_id = mid.split("/")[-1] if "/" in mid else mid
+                        chat_models.append(model_id)
+
+                if not chat_models:
+                    return fallback_models
+
+                chat_models.sort()
+                _LOGGER.debug("Fetched %d Gemini models", len(chat_models))
+                return chat_models
+
+    except Exception as e:
+        _LOGGER.warning("Error fetching Gemini models, using fallback list: %s", e)
+        return fallback_models
+
+
+async def fetch_openai_compatible_models(base_url, api_key=None, timeout=10):
+    """Fetch available models from an OpenAI-compatible endpoint.
+
+    Many local/self-hosted endpoints (LM Studio, vLLM, etc.) support /v1/models.
+    If the endpoint does not support it, fall back to ["Custom..."] only.
+    """
+    if not base_url:
+        return ["Custom..."]
+
+    url = f"{base_url.rstrip('/')}/models"
+
+    try:
+        async with aiohttp.ClientSession() as session:
+            headers = {"Content-Type": "application/json"}
+            if api_key:
+                headers["Authorization"] = f"Bearer {api_key}"
+
+            async with session.get(
+                url,
+                headers=headers,
+                timeout=aiohttp.ClientTimeout(total=timeout),
+            ) as resp:
+                if resp.status not in (200, 201):
+                    _LOGGER.debug(
+                        "OpenAI-compatible endpoint did not support /v1/models (status=%d)",
+                        resp.status,
+                    )
+                    return ["Custom..."]
+
+                data = await resp.json()
+                models = data.get("data", [])
+                if not isinstance(models, list):
+                    return ["Custom..."]
+
+                # Collect all model IDs
+                model_ids = []
+                for m in models:
+                    mid = m.get("id", "")
+                    if isinstance(mid, str) and mid:
+                        model_ids.append(mid)
+
+                if not model_ids:
+                    return ["Custom..."]
+
+                model_ids.sort()
+                _LOGGER.debug(
+                    "Fetched %d models from OpenAI-compatible endpoint", len(model_ids)
+                )
+                return model_ids
+
+    except Exception as e:
+        _LOGGER.debug(
+            "Error fetching models from OpenAI-compatible endpoint, using Custom only: %s",
+            e,
+        )
+        return ["Custom..."]
+
+
 class OpenAIClient(BaseAIClient):
-    def __init__(self, token, model="gpt-3.5-turbo"):
+    def __init__(self, token, model="gpt-4.1-mini", base_url=None):
         self.token = token
         self.model = model
-        self.api_url = "https://api.openai.com/v1/chat/completions"
+        # Use custom base_url if provided; otherwise default to official OpenAI endpoint
+        if base_url and base_url.strip():
+            base = base_url.strip().rstrip("/")
+            self.api_url = f"{base}/responses"
+        else:
+            self.api_url = "https://api.openai.com/v1/responses"
 
     def _is_restricted_model(self):
         """Check if the model has restricted parameters (no temperature, top_p, etc.)."""
@@ -636,21 +813,28 @@ class OpenAIClient(BaseAIClient):
             "Content-Type": "application/json",
         }
 
-        # Check if model has restricted parameters
-        is_restricted = self._is_restricted_model()
-        _LOGGER.debug(
-            "Using model: %s (restricted parameters: %s)",
-            self.model,
-            is_restricted,
-        )
+        # Build input string from messages for the Responses API
+        # Preserve system instructions and conversation history in a simple format
+        parts = []
+        for msg in messages:
+            role = (msg.get("role") or "user").lower()
+            content = msg.get("content") or ""
+            if role == "system":
+                parts.append(f"System: {content}")
+            elif role == "user":
+                parts.append(f"User: {content}")
+            elif role == "assistant":
+                parts.append(f"Assistant: {content}")
+            else:
+                parts.append(f"{role.capitalize()}: {content}")
 
-        # Build payload with model-appropriate parameters
-        # Don't set max_tokens - let OpenAI use the model's maximum capacity
-        payload = {"model": self.model, "messages": messages}
+        input_text = "\n\n".join(parts)
 
-        # Only add temperature and top_p for models that support them
-        if not is_restricted:
-            payload.update({"temperature": 0.7, "top_p": 0.9})
+        # Build payload for /v1/responses
+        payload = {
+            "model": self.model,
+            "input": input_text,
+        }
 
         _LOGGER.debug("OpenAI request payload: %s", json.dumps(payload, indent=2))
 
@@ -677,22 +861,25 @@ class OpenAIClient(BaseAIClient):
                         f"Invalid JSON response from OpenAI: {response_text[:200]}"
                     )
 
-                # Extract text from OpenAI response
-                choices = data.get("choices", [])
-                if choices and "message" in choices[0]:
-                    content = choices[0]["message"].get("content", "")
-                    if not content:
-                        _LOGGER.warning("OpenAI returned empty content in message")
-                        _LOGGER.debug(
-                            "Full OpenAI response: %s", json.dumps(data, indent=2)
-                        )
+                # Extract text from OpenAI Responses API
+                # Primary field: output_text
+                content = data.get("output_text")
+                if content:
                     return content
-                else:
-                    _LOGGER.warning("OpenAI response missing expected structure")
-                    _LOGGER.debug(
-                        "Full OpenAI response: %s", json.dumps(data, indent=2)
-                    )
-                    return str(data)
+
+                # Fallback: if response has 'output' list with text content
+                output = data.get("output")
+                if isinstance(output, list):
+                    for item in output:
+                        if isinstance(item, dict):
+                            tc = item.get("text") or item.get("content")
+                            if tc:
+                                return tc
+
+                # Last resort: return full response as string
+                _LOGGER.warning("OpenAI response missing expected structure")
+                _LOGGER.debug("Full OpenAI response: %s", json.dumps(data, indent=2))
+                return str(data)
 
 
 class GeminiClient(BaseAIClient):
@@ -1297,7 +1484,10 @@ class AiAgentHaAgent:
         # Initialize the appropriate AI client with model selection
         if provider == "openai":
             model = models_config.get("openai", "gpt-3.5-turbo")
-            self.ai_client = OpenAIClient(config.get("openai_token"), model)
+            base_url = config.get(CONF_OPENAI_BASE_URL) or ""
+            self.ai_client = OpenAIClient(
+                config.get("openai_token"), model, base_url or None
+            )
         elif provider == "gemini":
             model = models_config.get("gemini", "gemini-2.5-flash")
             self.ai_client = GeminiClient(config.get("gemini_token"), model)

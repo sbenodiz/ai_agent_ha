@@ -7,6 +7,9 @@ CONF_WEATHER_ENTITY = "weather_entity"
 # AI Provider configuration keys
 CONF_LLAMA_TOKEN = "llama_token"  # nosec B105
 CONF_OPENAI_TOKEN = "openai_token"  # nosec B105
+CONF_OPENAI_BASE_URL = (
+    "openai_base_url"  # nosec B105 - configuration key, not a credential
+)
 CONF_GEMINI_TOKEN = "gemini_token"  # nosec B105
 CONF_OPENROUTER_TOKEN = "openrouter_token"  # nosec B105
 CONF_ANTHROPIC_TOKEN = "anthropic_token"  # nosec B105
