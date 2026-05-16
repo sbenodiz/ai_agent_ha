@@ -666,6 +666,122 @@ async def fetch_openai_models(base_url, api_key, timeout=10):
         return fallback_models
 
 
+async def fetch_gemini_models(api_key, timeout=10):
+    """Fetch available Gemini models dynamically.
+
+    Returns a list of model IDs suitable for chat. On failure,
+    returns a small safe fallback list.
+    """
+    if not api_key:
+        return [
+            "gemini-2.5-flash",
+            "gemini-2.5-pro",
+        ]
+
+    url = f"https://generativelanguage.googleapis.com/v1beta/models?key={api_key}"
+
+    fallback_models = [
+        "gemini-2.5-flash",
+        "gemini-2.5-pro",
+    ]
+
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(
+                url,
+                timeout=aiohttp.ClientTimeout(total=timeout),
+            ) as resp:
+                if resp.status != 200:
+                    _LOGGER.warning(
+                        "Failed to fetch Gemini models (status=%d), using fallback list",
+                        resp.status,
+                    )
+                    return fallback_models
+
+                data = await resp.json()
+                models = data.get("models", [])
+                if not isinstance(models, list):
+                    return fallback_models
+
+                # Filter likely chat-capable models
+                chat_models = []
+                for m in models:
+                    mid = m.get("name", "")
+                    if isinstance(mid, str) and "gemini" in mid.lower():
+                        # Extract model ID from name like "models/gemini-2.5-flash"
+                        model_id = mid.split("/")[-1] if "/" in mid else mid
+                        chat_models.append(model_id)
+
+                if not chat_models:
+                    return fallback_models
+
+                chat_models.sort()
+                _LOGGER.debug("Fetched %d Gemini models", len(chat_models))
+                return chat_models
+
+    except Exception as e:
+        _LOGGER.warning("Error fetching Gemini models, using fallback list: %s", e)
+        return fallback_models
+
+
+async def fetch_openai_compatible_models(base_url, api_key=None, timeout=10):
+    """Fetch available models from an OpenAI-compatible endpoint.
+
+    Many local/self-hosted endpoints (LM Studio, vLLM, etc.) support /v1/models.
+    If the endpoint does not support it, fall back to ["Custom..."] only.
+    """
+    if not base_url:
+        return ["Custom..."]
+
+    url = f"{base_url.rstrip('/')}/models"
+
+    try:
+        async with aiohttp.ClientSession() as session:
+            headers = {"Content-Type": "application/json"}
+            if api_key:
+                headers["Authorization"] = f"Bearer {api_key}"
+
+            async with session.get(
+                url,
+                headers=headers,
+                timeout=aiohttp.ClientTimeout(total=timeout),
+            ) as resp:
+                if resp.status not in (200, 201):
+                    _LOGGER.debug(
+                        "OpenAI-compatible endpoint did not support /v1/models (status=%d)",
+                        resp.status,
+                    )
+                    return ["Custom..."]
+
+                data = await resp.json()
+                models = data.get("data", [])
+                if not isinstance(models, list):
+                    return ["Custom..."]
+
+                # Collect all model IDs
+                model_ids = []
+                for m in models:
+                    mid = m.get("id", "")
+                    if isinstance(mid, str) and mid:
+                        model_ids.append(mid)
+
+                if not model_ids:
+                    return ["Custom..."]
+
+                model_ids.sort()
+                _LOGGER.debug(
+                    "Fetched %d models from OpenAI-compatible endpoint", len(model_ids)
+                )
+                return model_ids
+
+    except Exception as e:
+        _LOGGER.debug(
+            "Error fetching models from OpenAI-compatible endpoint, using Custom only: %s",
+            e,
+        )
+        return ["Custom..."]
+
+
 class OpenAIClient(BaseAIClient):
     def __init__(self, token, model="gpt-4.1-mini", base_url=None):
         self.token = token
