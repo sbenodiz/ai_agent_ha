@@ -15,6 +15,7 @@ from homeassistant.helpers.selector import (
     TextSelectorConfig,
 )
 
+from .agent import fetch_openai_models
 from .const import (
     CONF_LOCAL_OLLAMA_URL,
     CONF_OPENAI_BASE_URL,
@@ -242,6 +243,8 @@ class AiAgentHaConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):  # type: ig
                     self.config_data[CONF_OPENAI_BASE_URL] = (
                         base_url or "https://api.openai.com/v1"
                     )
+                    # For OpenAI, move to next step to select model from dynamic list
+                    return await self.async_step_configure_openai_models()
 
                 # Add model configuration if provided
                 selected_model = user_input.get("model")
@@ -372,8 +375,8 @@ class AiAgentHaConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):  # type: ig
             )
 
         if provider == "openai":
-            # For OpenAI provider, we need token and optional Base URL
-            # Pre-fill with official endpoint so users see the default
+            # For OpenAI provider, first step: API Key + Base URL
+            # Model selection happens in the next step after we fetch available models
             schema_dict = {
                 vol.Required(token_field): TextSelector(
                     TextSelectorConfig(type="password")
@@ -383,19 +386,6 @@ class AiAgentHaConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):  # type: ig
                     default="https://api.openai.com/v1",
                 ): TextSelector(TextSelectorConfig(type="text")),
             }
-
-            # Add model selection
-            if available_models:
-                if "Custom..." in available_models:
-                    model_options = available_models
-                else:
-                    model_options = available_models + ["Custom..."]
-                schema_dict[vol.Optional("model", default=dropdown_default)] = (
-                    SelectSelector(SelectSelectorConfig(options=model_options))
-                )
-                schema_dict[vol.Optional("custom_model")] = TextSelector(
-                    TextSelectorConfig(type="text")
-                )
 
             return self.async_show_form(
                 step_id="configure",
@@ -434,6 +424,62 @@ class AiAgentHaConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):  # type: ig
             errors=errors,
             description_placeholders={
                 "token_label": token_label,
+                "provider": PROVIDERS[provider],
+            },
+        )
+
+    async def async_step_configure_openai_models(self, user_input=None):
+        """Handle the OpenAI model selection step with dynamic model list."""
+        errors = {}
+        provider = "openai"
+        token = self.config_data.get("openai_token")
+        base_url = self.config_data.get(
+            CONF_OPENAI_BASE_URL, "https://api.openai.com/v1"
+        )
+
+        # Fetch available models dynamically
+        model_list = await fetch_openai_models(base_url, token)
+
+        # Ensure "Custom..." is always available
+        if "Custom..." not in model_list:
+            model_list.insert(0, "Custom...")
+
+        if user_input is not None:
+            try:
+                selected_model = user_input.get("model")
+                custom_model = user_input.get("custom_model")
+
+                # Initialize models dict if it doesn't exist
+                if "models" not in self.config_data:
+                    self.config_data["models"] = {}
+
+                if custom_model and custom_model.strip():
+                    self.config_data["models"][provider] = custom_model.strip()
+                elif selected_model and selected_model != "Custom...":
+                    self.config_data["models"][provider] = selected_model
+                else:
+                    self.config_data["models"][provider] = ""
+
+                return self.async_create_entry(
+                    title=f"AI Agent HA ({PROVIDERS[provider]})",
+                    data=self.config_data,
+                )
+            except Exception:  # pylint: disable=broad-except
+                _LOGGER.exception("Unexpected exception in OpenAI model selection")
+                errors["base"] = "unknown"
+
+        schema_dict = {
+            vol.Optional("model", default="Custom..."): SelectSelector(
+                SelectSelectorConfig(options=model_list)
+            ),
+            vol.Optional("custom_model"): TextSelector(TextSelectorConfig(type="text")),
+        }
+
+        return self.async_show_form(
+            step_id="configure_openai_models",
+            data_schema=vol.Schema(schema_dict),
+            errors=errors,
+            description_placeholders={
                 "provider": PROVIDERS[provider],
             },
         )
@@ -702,6 +748,14 @@ class AiAgentHaOptionsFlowHandler(config_entries.OptionsFlow):
                 or "https://api.openai.com/v1"
             )
 
+            # Fetch available models dynamically
+            current_token = self.config_entry.data.get("openai_token", "")
+            model_list = await fetch_openai_models(current_base_url, current_token)
+
+            # Ensure "Custom..." is always available
+            if "Custom..." not in model_list:
+                model_list.insert(0, "Custom...")
+
             schema_dict = {
                 vol.Required(token_field, default=display_token): TextSelector(
                     TextSelectorConfig(type="password")
@@ -711,14 +765,13 @@ class AiAgentHaOptionsFlowHandler(config_entries.OptionsFlow):
                 ): TextSelector(TextSelectorConfig(type="text")),
             }
 
-            # Add model selection
-            if available_models:
-                schema_dict[vol.Optional("model", default=model_default)] = (
-                    SelectSelector(SelectSelectorConfig(options=model_options))
-                )
-                schema_dict[
-                    vol.Optional("custom_model", default=custom_model_default)
-                ] = TextSelector(TextSelectorConfig(type="text"))
+            # Add model selection with dynamic list
+            schema_dict[vol.Optional("model", default=model_default)] = SelectSelector(
+                SelectSelectorConfig(options=model_list)
+            )
+            schema_dict[vol.Optional("custom_model", default=custom_model_default)] = (
+                TextSelector(TextSelectorConfig(type="text"))
+            )
 
             return self.async_show_form(
                 step_id="configure_options",

@@ -610,16 +610,72 @@ class LlamaClient(BaseAIClient):
                 return content.get("text", str(data))
 
 
+async def fetch_openai_models(base_url, api_key, timeout=10):
+    """Fetch available OpenAI models dynamically.
+
+    Returns a list of model IDs suitable for chat (gpt-*, o*). On failure,
+    returns a small safe fallback list.
+    """
+    if not base_url:
+        base_url = "https://api.openai.com/v1"
+    url = f"{base_url.rstrip('/')}/models"
+
+    fallback_models = [
+        "gpt-4.1-mini",
+        "gpt-4o-mini",
+        "o4-mini",
+    ]
+
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(
+                url,
+                headers={"Authorization": f"Bearer {api_key}"},
+                timeout=aiohttp.ClientTimeout(total=timeout),
+            ) as resp:
+                if resp.status != 200:
+                    _LOGGER.warning(
+                        "Failed to fetch OpenAI models (status=%d), using fallback list",
+                        resp.status,
+                    )
+                    return fallback_models
+
+                data = await resp.json()
+                models = data.get("data", [])
+                if not isinstance(models, list):
+                    return fallback_models
+
+                # Filter likely chat-capable models
+                chat_models = []
+                for m in models:
+                    mid = m.get("id", "")
+                    if isinstance(mid, str) and (
+                        mid.startswith("gpt-") or mid.startswith("o")
+                    ):
+                        chat_models.append(mid)
+
+                if not chat_models:
+                    return fallback_models
+
+                chat_models.sort()
+                _LOGGER.debug("Fetched %d OpenAI chat models", len(chat_models))
+                return chat_models
+
+    except Exception as e:
+        _LOGGER.warning("Error fetching OpenAI models, using fallback list: %s", e)
+        return fallback_models
+
+
 class OpenAIClient(BaseAIClient):
-    def __init__(self, token, model="gpt-3.5-turbo", base_url=None):
+    def __init__(self, token, model="gpt-4.1-mini", base_url=None):
         self.token = token
         self.model = model
         # Use custom base_url if provided; otherwise default to official OpenAI endpoint
         if base_url and base_url.strip():
             base = base_url.strip().rstrip("/")
-            self.api_url = f"{base}/chat/completions"
+            self.api_url = f"{base}/responses"
         else:
-            self.api_url = "https://api.openai.com/v1/chat/completions"
+            self.api_url = "https://api.openai.com/v1/responses"
 
     def _is_restricted_model(self):
         """Check if the model has restricted parameters (no temperature, top_p, etc.)."""
@@ -641,21 +697,28 @@ class OpenAIClient(BaseAIClient):
             "Content-Type": "application/json",
         }
 
-        # Check if model has restricted parameters
-        is_restricted = self._is_restricted_model()
-        _LOGGER.debug(
-            "Using model: %s (restricted parameters: %s)",
-            self.model,
-            is_restricted,
-        )
+        # Build input string from messages for the Responses API
+        # Preserve system instructions and conversation history in a simple format
+        parts = []
+        for msg in messages:
+            role = (msg.get("role") or "user").lower()
+            content = msg.get("content") or ""
+            if role == "system":
+                parts.append(f"System: {content}")
+            elif role == "user":
+                parts.append(f"User: {content}")
+            elif role == "assistant":
+                parts.append(f"Assistant: {content}")
+            else:
+                parts.append(f"{role.capitalize()}: {content}")
 
-        # Build payload with model-appropriate parameters
-        # Don't set max_tokens - let OpenAI use the model's maximum capacity
-        payload = {"model": self.model, "messages": messages}
+        input_text = "\n\n".join(parts)
 
-        # Only add temperature and top_p for models that support them
-        if not is_restricted:
-            payload.update({"temperature": 0.7, "top_p": 0.9})
+        # Build payload for /v1/responses
+        payload = {
+            "model": self.model,
+            "input": input_text,
+        }
 
         _LOGGER.debug("OpenAI request payload: %s", json.dumps(payload, indent=2))
 
@@ -682,22 +745,25 @@ class OpenAIClient(BaseAIClient):
                         f"Invalid JSON response from OpenAI: {response_text[:200]}"
                     )
 
-                # Extract text from OpenAI response
-                choices = data.get("choices", [])
-                if choices and "message" in choices[0]:
-                    content = choices[0]["message"].get("content", "")
-                    if not content:
-                        _LOGGER.warning("OpenAI returned empty content in message")
-                        _LOGGER.debug(
-                            "Full OpenAI response: %s", json.dumps(data, indent=2)
-                        )
+                # Extract text from OpenAI Responses API
+                # Primary field: output_text
+                content = data.get("output_text")
+                if content:
                     return content
-                else:
-                    _LOGGER.warning("OpenAI response missing expected structure")
-                    _LOGGER.debug(
-                        "Full OpenAI response: %s", json.dumps(data, indent=2)
-                    )
-                    return str(data)
+
+                # Fallback: if response has 'output' list with text content
+                output = data.get("output")
+                if isinstance(output, list):
+                    for item in output:
+                        if isinstance(item, dict):
+                            tc = item.get("text") or item.get("content")
+                            if tc:
+                                return tc
+
+                # Last resort: return full response as string
+                _LOGGER.warning("OpenAI response missing expected structure")
+                _LOGGER.debug("Full OpenAI response: %s", json.dumps(data, indent=2))
+                return str(data)
 
 
 class GeminiClient(BaseAIClient):
