@@ -377,10 +377,7 @@ class AiAgentHaConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):  # type: ig
                     TextSelectorConfig(type="password")
                 ),
                 vol.Optional(CONF_OPENAI_BASE_URL): TextSelector(
-                    TextSelectorConfig(
-                        type="text",
-                        placeholder="https://api.openai.com/v1",
-                    )
+                    TextSelectorConfig(type="text")
                 ),
             }
 
@@ -706,12 +703,7 @@ class AiAgentHaOptionsFlowHandler(config_entries.OptionsFlow):
                 ),
                 vol.Optional(
                     CONF_OPENAI_BASE_URL, default=current_base_url
-                ): TextSelector(
-                    TextSelectorConfig(
-                        type="text",
-                        placeholder="https://api.openai.com/v1",
-                    )
-                ),
+                ): TextSelector(TextSelectorConfig(type="text")),
             }
 
             # Add model selection
