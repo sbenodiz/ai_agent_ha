@@ -236,11 +236,12 @@ class AiAgentHaConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):  # type: ig
                     endpoint_type = user_input.get("zai_endpoint", "general")
                     self.config_data["zai_endpoint"] = endpoint_type
 
-                # For OpenAI, store optional Base URL (if provided)
+                # For OpenAI, store Base URL (defaults to official endpoint if unchanged)
                 if provider == "openai":
                     base_url = (user_input.get(CONF_OPENAI_BASE_URL) or "").strip()
-                    if base_url:
-                        self.config_data[CONF_OPENAI_BASE_URL] = base_url
+                    self.config_data[CONF_OPENAI_BASE_URL] = (
+                        base_url or "https://api.openai.com/v1"
+                    )
 
                 # Add model configuration if provided
                 selected_model = user_input.get("model")
@@ -372,13 +373,15 @@ class AiAgentHaConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):  # type: ig
 
         if provider == "openai":
             # For OpenAI provider, we need token and optional Base URL
+            # Pre-fill with official endpoint so users see the default
             schema_dict = {
                 vol.Required(token_field): TextSelector(
                     TextSelectorConfig(type="password")
                 ),
-                vol.Optional(CONF_OPENAI_BASE_URL): TextSelector(
-                    TextSelectorConfig(type="text")
-                ),
+                vol.Optional(
+                    CONF_OPENAI_BASE_URL,
+                    default="https://api.openai.com/v1",
+                ): TextSelector(TextSelectorConfig(type="text")),
             }
 
             # Add model selection
@@ -543,14 +546,12 @@ class AiAgentHaOptionsFlowHandler(config_entries.OptionsFlow):
                         endpoint_type = user_input.get("zai_endpoint", "general")
                         updated_data["zai_endpoint"] = endpoint_type
 
-                    # For OpenAI, update optional Base URL (if provided)
+                    # For OpenAI, update Base URL (default to official if blank)
                     if provider == "openai":
                         base_url = (user_input.get(CONF_OPENAI_BASE_URL) or "").strip()
-                        if base_url:
-                            updated_data[CONF_OPENAI_BASE_URL] = base_url
-                        else:
-                            # Remove Base URL if left blank
-                            updated_data.pop(CONF_OPENAI_BASE_URL, None)
+                        updated_data[CONF_OPENAI_BASE_URL] = (
+                            base_url or "https://api.openai.com/v1"
+                        )
 
                     # Initialize models dict if it doesn't exist
                     if "models" not in updated_data:
@@ -695,7 +696,11 @@ class AiAgentHaOptionsFlowHandler(config_entries.OptionsFlow):
 
         if provider == "openai":
             # For OpenAI provider, we need token and optional Base URL
-            current_base_url = self.config_entry.data.get(CONF_OPENAI_BASE_URL, "")
+            # Pre-fill with official endpoint if not set
+            current_base_url = (
+                self.config_entry.data.get(CONF_OPENAI_BASE_URL)
+                or "https://api.openai.com/v1"
+            )
 
             schema_dict = {
                 vol.Required(token_field, default=display_token): TextSelector(
