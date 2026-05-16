@@ -40,7 +40,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.storage import Store
 from homeassistant.util import dt as dt_util
 
-from .const import CONF_WEATHER_ENTITY, DOMAIN
+from .const import CONF_OPENAI_BASE_URL, CONF_WEATHER_ENTITY, DOMAIN
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -611,10 +611,15 @@ class LlamaClient(BaseAIClient):
 
 
 class OpenAIClient(BaseAIClient):
-    def __init__(self, token, model="gpt-3.5-turbo"):
+    def __init__(self, token, model="gpt-3.5-turbo", base_url=None):
         self.token = token
         self.model = model
-        self.api_url = "https://api.openai.com/v1/chat/completions"
+        # Use custom base_url if provided; otherwise default to official OpenAI endpoint
+        if base_url and base_url.strip():
+            base = base_url.strip().rstrip("/")
+            self.api_url = f"{base}/chat/completions"
+        else:
+            self.api_url = "https://api.openai.com/v1/chat/completions"
 
     def _is_restricted_model(self):
         """Check if the model has restricted parameters (no temperature, top_p, etc.)."""
@@ -1297,7 +1302,10 @@ class AiAgentHaAgent:
         # Initialize the appropriate AI client with model selection
         if provider == "openai":
             model = models_config.get("openai", "gpt-3.5-turbo")
-            self.ai_client = OpenAIClient(config.get("openai_token"), model)
+            base_url = config.get(CONF_OPENAI_BASE_URL) or ""
+            self.ai_client = OpenAIClient(
+                config.get("openai_token"), model, base_url or None
+            )
         elif provider == "gemini":
             model = models_config.get("gemini", "gemini-2.5-flash")
             self.ai_client = GeminiClient(config.get("gemini_token"), model)

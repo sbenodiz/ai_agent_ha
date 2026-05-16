@@ -15,7 +15,12 @@ from homeassistant.helpers.selector import (
     TextSelectorConfig,
 )
 
-from .const import CONF_LOCAL_OLLAMA_URL, CONF_OPENAI_COMPATIBLE_URL, DOMAIN
+from .const import (
+    CONF_LOCAL_OLLAMA_URL,
+    CONF_OPENAI_BASE_URL,
+    CONF_OPENAI_COMPATIBLE_URL,
+    DOMAIN,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -231,6 +236,12 @@ class AiAgentHaConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):  # type: ig
                     endpoint_type = user_input.get("zai_endpoint", "general")
                     self.config_data["zai_endpoint"] = endpoint_type
 
+                # For OpenAI, store optional Base URL (if provided)
+                if provider == "openai":
+                    base_url = (user_input.get(CONF_OPENAI_BASE_URL) or "").strip()
+                    if base_url:
+                        self.config_data[CONF_OPENAI_BASE_URL] = base_url
+
                 # Add model configuration if provided
                 selected_model = user_input.get("model")
                 custom_model = user_input.get("custom_model")
@@ -355,6 +366,43 @@ class AiAgentHaConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):  # type: ig
                 errors=errors,
                 description_placeholders={
                     "token_label": "OpenAI-Compatible URL",  # nosec B105 - UI label for config form, not a credential
+                    "provider": PROVIDERS[provider],
+                },
+            )
+
+        if provider == "openai":
+            # For OpenAI provider, we need token and optional Base URL
+            schema_dict = {
+                vol.Required(token_field): TextSelector(
+                    TextSelectorConfig(type="password")
+                ),
+                vol.Optional(CONF_OPENAI_BASE_URL): TextSelector(
+                    TextSelectorConfig(
+                        type="text",
+                        placeholder="https://api.openai.com/v1",
+                    )
+                ),
+            }
+
+            # Add model selection
+            if available_models:
+                if "Custom..." in available_models:
+                    model_options = available_models
+                else:
+                    model_options = available_models + ["Custom..."]
+                schema_dict[vol.Optional("model", default=dropdown_default)] = (
+                    SelectSelector(SelectSelectorConfig(options=model_options))
+                )
+                schema_dict[vol.Optional("custom_model")] = TextSelector(
+                    TextSelectorConfig(type="text")
+                )
+
+            return self.async_show_form(
+                step_id="configure",
+                data_schema=vol.Schema(schema_dict),
+                errors=errors,
+                description_placeholders={
+                    "token_label": token_label,
                     "provider": PROVIDERS[provider],
                 },
             )
@@ -498,6 +546,15 @@ class AiAgentHaOptionsFlowHandler(config_entries.OptionsFlow):
                         endpoint_type = user_input.get("zai_endpoint", "general")
                         updated_data["zai_endpoint"] = endpoint_type
 
+                    # For OpenAI, update optional Base URL (if provided)
+                    if provider == "openai":
+                        base_url = (user_input.get(CONF_OPENAI_BASE_URL) or "").strip()
+                        if base_url:
+                            updated_data[CONF_OPENAI_BASE_URL] = base_url
+                        else:
+                            # Remove Base URL if left blank
+                            updated_data.pop(CONF_OPENAI_BASE_URL, None)
+
                     # Initialize models dict if it doesn't exist
                     if "models" not in updated_data:
                         updated_data["models"] = {}
@@ -635,6 +692,43 @@ class AiAgentHaOptionsFlowHandler(config_entries.OptionsFlow):
                 errors=errors,
                 description_placeholders={
                     "token_label": "OpenAI-Compatible URL",  # nosec B105 - UI label for config form, not a credential
+                    "provider": PROVIDERS[provider],
+                },
+            )
+
+        if provider == "openai":
+            # For OpenAI provider, we need token and optional Base URL
+            current_base_url = self.config_entry.data.get(CONF_OPENAI_BASE_URL, "")
+
+            schema_dict = {
+                vol.Required(token_field, default=display_token): TextSelector(
+                    TextSelectorConfig(type="password")
+                ),
+                vol.Optional(
+                    CONF_OPENAI_BASE_URL, default=current_base_url
+                ): TextSelector(
+                    TextSelectorConfig(
+                        type="text",
+                        placeholder="https://api.openai.com/v1",
+                    )
+                ),
+            }
+
+            # Add model selection
+            if available_models:
+                schema_dict[vol.Optional("model", default=model_default)] = (
+                    SelectSelector(SelectSelectorConfig(options=model_options))
+                )
+                schema_dict[
+                    vol.Optional("custom_model", default=custom_model_default)
+                ] = TextSelector(TextSelectorConfig(type="text"))
+
+            return self.async_show_form(
+                step_id="configure_options",
+                data_schema=vol.Schema(schema_dict),
+                errors=errors,
+                description_placeholders={
+                    "token_label": token_label,
                     "provider": PROVIDERS[provider],
                 },
             )
