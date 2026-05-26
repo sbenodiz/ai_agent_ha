@@ -1,0 +1,40 @@
+spec_version: "0.1.0"
+name: ai-agent-ha
+version: 1.8.0
+description: >
+  A Home Assistant custom integration that bridges any AI provider (OpenAI, Anthropic Claude,
+  Google Gemini, OpenRouter, Llama, z.ai, and others) to your smart home. It translates
+  natural-language requests into Home Assistant operations — controlling devices, querying
+  sensor history, creating automations, and building Lovelace dashboards — all through a
+  clean chat interface embedded in the HA frontend.
+author: sbenodiz
+license: MIT
+
+model:
+  preferred: anthropic:claude-sonnet-4-5-20250929
+  fallback:
+    - openai:gpt-4o
+    - google:gemini-2.5-flash
+
+skills:
+  - control-devices
+  - create-automations
+  - create-dashboards
+  - query-entities
+  - get-history
+  - get-weather
+  - call-service
+
+runtime:
+  max_turns: 50
+  timeout: 300
+
+compliance:
+  risk_tier: standard
+  supervision:
+    human_in_the_loop: destructive
+    kill_switch: true
+  recordkeeping:
+    audit_logging: true
+  data_governance:
+    pii_handling: redact
