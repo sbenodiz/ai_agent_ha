@@ -786,12 +786,21 @@ class OpenAIClient(BaseAIClient):
     def __init__(self, token, model="gpt-4.1-mini", base_url=None):
         self.token = token
         self.model = model
-        # Use custom base_url if provided; otherwise default to official OpenAI endpoint
+        # Default endpoint is OpenAI's Responses API. If the user has pointed Base URL
+        # at a third-party "OpenAI-compatible" gateway (Open WebUI, LM Studio, vLLM,
+        # LiteLLM, ...), those servers only implement /chat/completions, so switch
+        # to Chat Completions when the base URL is not api.openai.com.
         if base_url and base_url.strip():
             base = base_url.strip().rstrip("/")
-            self.api_url = f"{base}/responses"
+            if "api.openai.com" in base:
+                self.api_url = f"{base}/responses"
+                self.use_chat_completions = False
+            else:
+                self.api_url = f"{base}/chat/completions"
+                self.use_chat_completions = True
         else:
             self.api_url = "https://api.openai.com/v1/responses"
+            self.use_chat_completions = False
 
     def _is_restricted_model(self):
         """Check if the model has restricted parameters (no temperature, top_p, etc.)."""
@@ -813,28 +822,33 @@ class OpenAIClient(BaseAIClient):
             "Content-Type": "application/json",
         }
 
-        # Build input string from messages for the Responses API
-        # Preserve system instructions and conversation history in a simple format
-        parts = []
-        for msg in messages:
-            role = (msg.get("role") or "user").lower()
-            content = msg.get("content") or ""
-            if role == "system":
-                parts.append(f"System: {content}")
-            elif role == "user":
-                parts.append(f"User: {content}")
-            elif role == "assistant":
-                parts.append(f"Assistant: {content}")
-            else:
-                parts.append(f"{role.capitalize()}: {content}")
-
-        input_text = "\n\n".join(parts)
-
-        # Build payload for /v1/responses
-        payload = {
-            "model": self.model,
-            "input": input_text,
-        }
+        if self.use_chat_completions:
+            # Chat Completions: forward messages as-is.
+            payload = {
+                "model": self.model,
+                "messages": messages,
+            }
+            if not self._is_restricted_model():
+                payload["temperature"] = 0.7
+                payload["top_p"] = 0.9
+        else:
+            # Responses API: flatten messages into a single input string.
+            parts = []
+            for msg in messages:
+                role = (msg.get("role") or "user").lower()
+                content = msg.get("content") or ""
+                if role == "system":
+                    parts.append(f"System: {content}")
+                elif role == "user":
+                    parts.append(f"User: {content}")
+                elif role == "assistant":
+                    parts.append(f"Assistant: {content}")
+                else:
+                    parts.append(f"{role.capitalize()}: {content}")
+            payload = {
+                "model": self.model,
+                "input": "\n\n".join(parts),
+            }
 
         _LOGGER.debug("OpenAI request payload: %s", json.dumps(payload, indent=2))
 
@@ -860,6 +874,17 @@ class OpenAIClient(BaseAIClient):
                     raise Exception(
                         f"Invalid JSON response from OpenAI: {response_text[:200]}"
                     )
+
+                if self.use_chat_completions:
+                    # Chat Completions response shape
+                    choices = data.get("choices", [])
+                    if choices and "message" in choices[0]:
+                        return choices[0]["message"].get("content", "") or ""
+                    _LOGGER.warning("OpenAI response missing expected structure")
+                    _LOGGER.debug(
+                        "Full OpenAI response: %s", json.dumps(data, indent=2)
+                    )
+                    return str(data)
 
                 # Extract text from OpenAI Responses API
                 # Primary field: output_text

@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.12] - 2026-05-27
+
+### Fixed
+- **OpenAI-Compatible provider was missing the API key field** ([#70](https://github.com/sbenodiz/ai_agent_ha/issues/70))
+  - The runtime read `openai_compatible_api_key` from config, but the config flow never
+    collected it, so the `Authorization: Bearer ...` header was never sent. Authenticated
+    gateways (Open WebUI, LiteLLM, hosted vLLM) returned 401 even when the same key
+    worked in the gateway's own UI.
+  - Added an optional API key field to both the initial config and the options/edit flow.
+- **OpenAI provider with a custom Base URL hit `/responses`** ([#70](https://github.com/sbenodiz/ai_agent_ha/issues/70))
+  - Third-party "OpenAI-compatible" servers implement `/chat/completions`, not OpenAI's
+    newer Responses API. The OpenAI client now routes to `/chat/completions` when the
+    Base URL is not `api.openai.com`, and keeps the Responses API for real OpenAI.
+
+## [1.11] (and earlier accumulated changes)
+
 ### Fixed
 - **CRITICAL**: Fixed Anthropic API system prompt being overwritten by data payloads
   - Data responses now correctly use "user" role instead of "system" role
