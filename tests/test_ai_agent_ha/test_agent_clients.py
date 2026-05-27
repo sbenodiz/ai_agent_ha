@@ -121,13 +121,68 @@ class TestOpenAIClient:
         """Test OpenAIClient with invalid token."""
         try:
             from custom_components.ai_agent_ha.agent import OpenAIClient
-            
+
             client = OpenAIClient("invalid-token", "gpt-3.5-turbo")
-            
+
             with pytest.raises(Exception) as exc_info:
                 await client.get_response([{"role": "user", "content": "test"}])
             assert "Invalid OpenAI API key format" in str(exc_info.value)
-            
+
+        except ImportError:
+            pytest.skip("OpenAIClient not available")
+
+    def test_openai_client_default_uses_responses_api(self):
+        """Regression: default OpenAIClient hits OpenAI's Responses API.
+
+        Locks in v1.12 behavior (issue #70). Real OpenAI users must keep
+        the /responses endpoint.
+        """
+        try:
+            from custom_components.ai_agent_ha.agent import OpenAIClient
+
+            client = OpenAIClient("sk-test", "gpt-4.1-mini")
+            assert client.api_url == "https://api.openai.com/v1/responses"
+            assert client.use_chat_completions is False
+        except ImportError:
+            pytest.skip("OpenAIClient not available")
+
+    def test_openai_client_official_base_url_uses_responses_api(self):
+        """Regression: explicit api.openai.com base_url still uses Responses API."""
+        try:
+            from custom_components.ai_agent_ha.agent import OpenAIClient
+
+            client = OpenAIClient(
+                "sk-test", "gpt-4.1-mini", base_url="https://api.openai.com/v1"
+            )
+            assert client.api_url == "https://api.openai.com/v1/responses"
+            assert client.use_chat_completions is False
+        except ImportError:
+            pytest.skip("OpenAIClient not available")
+
+    def test_openai_client_custom_base_url_uses_chat_completions(self):
+        """Regression for issue #70 Bug 2: custom Base URL must route to /chat/completions.
+
+        Third-party OpenAI-compatible servers (Open WebUI, LM Studio, vLLM, LiteLLM)
+        do not implement the Responses API. If this test fails because someone
+        reverted to /responses, users with custom Base URLs will get 401 / 404.
+        """
+        try:
+            from custom_components.ai_agent_ha.agent import OpenAIClient
+
+            client = OpenAIClient(
+                "sk-test", "my-model", base_url="https://my-gateway.example.com/v1"
+            )
+            assert client.api_url == "https://my-gateway.example.com/v1/chat/completions"
+            assert client.use_chat_completions is True
+
+            # Trailing slash must be stripped before /chat/completions is appended.
+            client_ts = OpenAIClient(
+                "sk-test", "my-model", base_url="https://my-gateway.example.com/v1/"
+            )
+            assert (
+                client_ts.api_url
+                == "https://my-gateway.example.com/v1/chat/completions"
+            )
         except ImportError:
             pytest.skip("OpenAIClient not available")
 
