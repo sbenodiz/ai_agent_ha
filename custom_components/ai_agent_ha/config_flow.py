@@ -253,12 +253,16 @@ class AiAgentHaConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):  # type: ig
                     # For OpenAI, move to next step to select model from dynamic list
                     return await self.async_step_configure_openai_models()
 
-                # For OpenAI-Compatible, store Base URL and move to model selection
+                # For OpenAI-Compatible, store Base URL + optional API key, then move on
                 if provider == "openai_compatible":
                     base_url = (
                         user_input.get(CONF_OPENAI_COMPATIBLE_URL) or ""
                     ).strip()
                     self.config_data[CONF_OPENAI_COMPATIBLE_URL] = base_url
+                    api_key = (
+                        user_input.get("openai_compatible_api_key") or ""
+                    ).strip()
+                    self.config_data["openai_compatible_api_key"] = api_key
                     # Move to next step to select model from dynamic list
                     return await self.async_step_configure_openai_compatible_models()
 
@@ -364,11 +368,15 @@ class AiAgentHaConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):  # type: ig
             )
 
         if provider == "openai_compatible":
-            # For openai_compatible provider, we need base URL and optional model name
-            # We'll fetch models dynamically in the next step if the endpoint supports it
+            # For openai_compatible provider, we need base URL + optional API key.
+            # Many local endpoints (LM Studio, vLLM) need no key; gateways like
+            # Open WebUI or LiteLLM require one. Models are fetched in the next step.
             schema_dict = {
                 vol.Required(CONF_OPENAI_COMPATIBLE_URL): TextSelector(
                     TextSelectorConfig(type="text")
+                ),
+                vol.Optional("openai_compatible_api_key", default=""): TextSelector(
+                    TextSelectorConfig(type="password")
                 ),
             }
 
@@ -672,6 +680,12 @@ class AiAgentHaOptionsFlowHandler(config_entries.OptionsFlow):
                             base_url or "https://api.openai.com/v1"
                         )
 
+                    # For OpenAI-Compatible, update the optional API key
+                    if provider == "openai_compatible":
+                        updated_data["openai_compatible_api_key"] = (
+                            user_input.get("openai_compatible_api_key") or ""
+                        ).strip()
+
                     # Initialize models dict if it doesn't exist
                     if "models" not in updated_data:
                         updated_data["models"] = {}
@@ -782,13 +796,15 @@ class AiAgentHaOptionsFlowHandler(config_entries.OptionsFlow):
             )
 
         if provider == "openai_compatible":
-            # For openai_compatible provider, we need URL and optional model name
+            # For openai_compatible provider, we need URL + optional API key + model
             current_url = self.config_entry.data.get(CONF_OPENAI_COMPATIBLE_URL, "")
+            current_api_key = (
+                self.config_entry.data.get("openai_compatible_api_key") or ""
+            )
 
             # Fetch available models dynamically if the endpoint supports it
-            api_key = self.config_entry.data.get("openai_compatible_api_key") or ""
             model_list = await fetch_openai_compatible_models(
-                current_url, api_key or None
+                current_url, current_api_key or None
             )
 
             # Ensure "Custom..." is always available
@@ -799,6 +815,9 @@ class AiAgentHaOptionsFlowHandler(config_entries.OptionsFlow):
                 vol.Required(
                     CONF_OPENAI_COMPATIBLE_URL, default=current_url
                 ): TextSelector(TextSelectorConfig(type="text")),
+                vol.Optional(
+                    "openai_compatible_api_key", default=current_api_key
+                ): TextSelector(TextSelectorConfig(type="password")),
             }
 
             # Add model selection with dynamic list
