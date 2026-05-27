@@ -128,11 +128,50 @@ class TestConfigFlow:
         try:
             config_flow_module = _import_config_flow_directly()
             flow_class = config_flow_module.AiAgentHaConfigFlow
-            
+
             # Test that we can instantiate the class (basic smoke test)
             flow = flow_class()
             assert flow is not None
             assert flow.VERSION == 1
-            
+
         except Exception as e:
             pytest.skip(f"Config flow schema test failed: {e}")
+
+    def test_openai_compatible_api_key_field_present(self):
+        """Regression for issue #70 Bug 1: openai_compatible must expose an API key field.
+
+        In v1.11 the runtime read openai_compatible_api_key from config but the
+        config flow never collected it, so the Authorization header was never sent
+        and authenticated gateways returned 401. This test guards against that
+        regression by checking the source of config_flow.py for:
+          - the field appearing as a vol.Optional in BOTH the create and options forms
+          - the field being persisted in BOTH save paths
+        """
+        config_flow_path = os.path.abspath(
+            os.path.join(
+                os.path.dirname(__file__),
+                "..",
+                "..",
+                "custom_components",
+                "ai_agent_ha",
+                "config_flow.py",
+            )
+        )
+        with open(config_flow_path, encoding="utf-8") as f:
+            src = f.read()
+
+        # The field must appear as an Optional schema entry at least twice
+        # (initial create flow + options/edit flow).
+        field_decls = src.count('"openai_compatible_api_key"')
+        assert field_decls >= 4, (
+            f"openai_compatible_api_key referenced only {field_decls}× in "
+            f"config_flow.py; expected >= 4 (2 schema fields + 2 save paths)"
+        )
+
+        # And it must be persisted into the config in both paths.
+        assert 'self.config_data["openai_compatible_api_key"]' in src, (
+            "openai_compatible_api_key not saved in initial config flow"
+        )
+        assert 'updated_data["openai_compatible_api_key"]' in src, (
+            "openai_compatible_api_key not saved in options/edit flow"
+        )
