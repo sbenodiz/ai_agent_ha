@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.13] - 2026-06-01
+
+### Fixed
+- **OpenAI provider crashed with `'list' object has no attribute 'strip'`** ([#75](https://github.com/sbenodiz/ai_agent_ha/issues/75))
+  - The OpenAI Responses API (`/v1/responses`, the default for the OpenAI provider)
+    returns the assistant text nested in `output[].content[].text`, and the raw HTTP
+    body has no top-level `output_text` (that field is an SDK-only convenience
+    property). The response parser fell through to a fallback that returned the
+    `content` **list** instead of a string, so the agent then called `.strip()` on a
+    list and failed on every retry — the sidebar showed "AI client error on attempt
+    1" repeated 10 times for any prompt.
+  - The parser now descends into `output[].content[]` and concatenates every
+    `output_text` block into a string, and correctly skips non-text items such as the
+    leading `reasoning` item emitted by o-series models.
+  - Added a defensive guard so any client that returns a non-string degrades
+    gracefully instead of exhausting all retries with an opaque `AttributeError`.
+
 ## [1.12] - 2026-05-27
 
 ### Fixed

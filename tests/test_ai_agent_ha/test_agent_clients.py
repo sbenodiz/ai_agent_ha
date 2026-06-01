@@ -11,6 +11,47 @@ import os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
 
+def _mock_aiohttp_session(response_text, status=200):
+    """Return a patch() for aiohttp.ClientSession that yields a fixed HTTP body.
+
+    Mocks the nested async context managers used by the clients:
+        async with aiohttp.ClientSession() as session:
+            async with session.post(...) as resp:
+                await resp.text()
+    """
+
+    class _FakeResp:
+        def __init__(self):
+            self.status = status
+            self.headers = {}
+
+        async def text(self):
+            return response_text
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+    class _FakeSession:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def post(self, *args, **kwargs):
+            return _FakeResp()
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+    return patch(
+        "custom_components.ai_agent_ha.agent.aiohttp.ClientSession", _FakeSession
+    )
+
+
 class TestLocalOllamaClient:
     """Test Local Ollama AI client functionality."""
 
@@ -185,6 +226,103 @@ class TestOpenAIClient:
             )
         except ImportError:
             pytest.skip("OpenAIClient not available")
+
+    @pytest.mark.asyncio
+    async def test_openai_responses_api_returns_string_not_list(self):
+        """Regression for issue #75: 'list' object has no attribute 'strip'.
+
+        The raw /v1/responses body has NO top-level 'output_text' (that is an
+        SDK-only convenience property). The real text lives in
+        output[].content[].text, which is a LIST. The client must extract the
+        string, never return the content list (that caused _query_ai() to call
+        .strip() on a list and fail every attempt).
+        """
+        try:
+            from custom_components.ai_agent_ha.agent import OpenAIClient
+        except ImportError:
+            pytest.skip("OpenAIClient not available")
+
+        client = OpenAIClient("sk-test", "gpt-4o-mini")  # default -> /v1/responses
+        assert client.use_chat_completions is False
+
+        body = json.dumps(
+            {
+                "id": "resp_abc",
+                "object": "response",
+                "model": "gpt-4o-mini",
+                "status": "completed",
+                # Intentionally no "output_text" — matches the raw HTTP body.
+                "output": [
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [
+                            {
+                                "type": "output_text",
+                                "text": '{"request_type": "final_response", "response": "hi"}',
+                                "annotations": [],
+                            }
+                        ],
+                    }
+                ],
+            }
+        )
+
+        with _mock_aiohttp_session(body):
+            result = await client.get_response([{"role": "user", "content": "hi"}])
+
+        assert isinstance(result, str), f"expected str, got {type(result).__name__}"
+        # The bug manifested as .strip() failing on a list; assert it works now.
+        assert result.strip() == (
+            '{"request_type": "final_response", "response": "hi"}'
+        )
+
+    @pytest.mark.asyncio
+    async def test_openai_responses_api_skips_reasoning_items(self):
+        """Reasoning models emit a leading 'reasoning' item with no text.
+
+        The client must skip it and still return the message text as a string.
+        """
+        try:
+            from custom_components.ai_agent_ha.agent import OpenAIClient
+        except ImportError:
+            pytest.skip("OpenAIClient not available")
+
+        client = OpenAIClient("sk-test", "o3-mini")
+
+        body = json.dumps(
+            {
+                "output": [
+                    {"type": "reasoning", "id": "rs_1", "summary": []},
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": "answer text"}],
+                    },
+                ]
+            }
+        )
+
+        with _mock_aiohttp_session(body):
+            result = await client.get_response([{"role": "user", "content": "hi"}])
+
+        assert result == "answer text"
+
+    @pytest.mark.asyncio
+    async def test_openai_responses_api_uses_output_text_fast_path(self):
+        """If a gateway does include a string 'output_text', use it directly."""
+        try:
+            from custom_components.ai_agent_ha.agent import OpenAIClient
+        except ImportError:
+            pytest.skip("OpenAIClient not available")
+
+        client = OpenAIClient("sk-test", "gpt-4o-mini")
+        body = json.dumps({"output_text": "direct text", "output": []})
+
+        with _mock_aiohttp_session(body):
+            result = await client.get_response([{"role": "user", "content": "hi"}])
+
+        assert result == "direct text"
 
 
 class TestGeminiClient:
