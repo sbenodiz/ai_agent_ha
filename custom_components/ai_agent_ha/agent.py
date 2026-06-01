@@ -886,20 +886,41 @@ class OpenAIClient(BaseAIClient):
                     )
                     return str(data)
 
-                # Extract text from OpenAI Responses API
-                # Primary field: output_text
+                # Extract text from OpenAI Responses API.
+                # Primary field: output_text is an SDK-only convenience property
+                # and is normally absent from the raw HTTP body, so it is only a
+                # fast path when a gateway happens to include it as a string.
                 content = data.get("output_text")
-                if content:
+                if isinstance(content, str) and content:
                     return content
 
-                # Fallback: if response has 'output' list with text content
+                # Fallback: the Responses API returns
+                #   output: [ { type: "message", content: [ { type: "output_text",
+                #               text: "..." }, ... ] }, ... ]
+                # plus, for reasoning models, leading items (e.g. type "reasoning")
+                # that carry no text. Concatenate every output_text block we find.
+                # NOTE: item["content"] is a LIST here, so it must never be
+                # returned directly (that caused issue #75: 'list' object has no
+                # attribute 'strip').
                 output = data.get("output")
                 if isinstance(output, list):
+                    text_parts = []
                     for item in output:
-                        if isinstance(item, dict):
-                            tc = item.get("text") or item.get("content")
-                            if tc:
-                                return tc
+                        if not isinstance(item, dict):
+                            continue
+                        content_blocks = item.get("content")
+                        if isinstance(content_blocks, list):
+                            for block in content_blocks:
+                                if isinstance(block, dict) and isinstance(
+                                    block.get("text"), str
+                                ):
+                                    text_parts.append(block["text"])
+                        elif isinstance(content_blocks, str) and content_blocks:
+                            text_parts.append(content_blocks)
+                        elif isinstance(item.get("text"), str):
+                            text_parts.append(item["text"])
+                    if text_parts:
+                        return "".join(text_parts)
 
                 # Last resort: return full response as string
                 _LOGGER.warning("OpenAI response missing expected structure")
@@ -3870,6 +3891,21 @@ Then restart Home Assistant to see your new dashboard in the sidebar."""
                     self._max_retries,
                 )
                 response = await self.ai_client.get_response(recent_messages)
+                # Every client is expected to return a string. Guard against a
+                # client handing back a non-string (e.g. a raw list/dict from an
+                # unexpected provider response shape) so the downstream string
+                # operations below don't crash with an unhelpful AttributeError
+                # and burn all retries (see issue #75).
+                if response is not None and not isinstance(response, str):
+                    _LOGGER.warning(
+                        "AI client returned non-string response of type %s; coercing to str",
+                        type(response).__name__,
+                    )
+                    response = (
+                        json.dumps(response)
+                        if isinstance(response, (list, dict))
+                        else str(response)
+                    )
                 _LOGGER.debug(
                     "AI client returned response of length: %d", len(response or "")
                 )
