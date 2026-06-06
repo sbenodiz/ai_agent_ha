@@ -110,6 +110,28 @@ def sanitize_for_logging(data: Any, mask: str = "***REDACTED***") -> Any:
 
 
 # === AI Client Abstractions ===
+class NonRetryableAIError(Exception):
+    """Provider error that cannot succeed on retry (e.g. deterministic HTTP 4xx).
+
+    Raised for client errors like "prompt is too long" where re-sending the
+    identical payload is guaranteed to fail again (see issue #80). Rate
+    limiting (429) and request timeouts (408) stay retryable.
+    """
+
+
+class RateLimitedAIError(Exception):
+    """Provider rate limit (HTTP 429) with an optional server-suggested wait.
+
+    Carries the provider's retry-after hint so the retry loop can wait long
+    enough for a per-minute token window to reset instead of burning all
+    retries in a few seconds (see issue #80).
+    """
+
+    def __init__(self, message: str, retry_after: Optional[float] = None):
+        super().__init__(message)
+        self.retry_after = retry_after
+
+
 class BaseAIClient:
     async def get_response(self, messages, **kwargs):
         raise NotImplementedError
@@ -1096,12 +1118,35 @@ class AnthropicClient(BaseAIClient):
                 self.api_url,
                 headers=headers,
                 json=payload,
-                timeout=aiohttp.ClientTimeout(total=30),
+                timeout=aiohttp.ClientTimeout(total=300),
             ) as resp:
                 if resp.status != 200:
                     error_text = await resp.text()
                     _LOGGER.error("Anthropic API error %d: %s", resp.status, error_text)
-                    raise Exception(f"Anthropic API error {resp.status}")
+                    # Surface the API's own error message (e.g. "prompt is too
+                    # long: N tokens > 200000 maximum") instead of a bare status
+                    # code so the user can see why the request failed (issue #80).
+                    try:
+                        detail = json.loads(error_text)["error"]["message"]
+                    except (ValueError, KeyError, TypeError):
+                        detail = error_text[:300]
+                    message = f"Anthropic API error {resp.status}: {detail}"
+                    if resp.status == 429:
+                        # Honor the server's retry-after hint so the retry
+                        # loop waits out per-minute token windows.
+                        retry_after = None
+                        try:
+                            header = resp.headers.get("retry-after")
+                            if header is not None:
+                                retry_after = float(header)
+                        except (TypeError, ValueError):
+                            retry_after = None
+                        raise RateLimitedAIError(message, retry_after=retry_after)
+                    if 400 <= resp.status < 500 and resp.status != 408:
+                        # Deterministic client error - retrying the identical
+                        # payload cannot succeed, so don't burn retries on it.
+                        raise NonRetryableAIError(message)
+                    raise Exception(message)
                 data = await resp.json()
                 # Extract text from Anthropic response
                 content_blocks = data.get("content", [])
@@ -1642,6 +1687,83 @@ class AiAgentHaAgent:
     def _set_cached_data(self, key: str, data: Any) -> None:
         """Store data in cache with timestamp."""
         self._cache[key] = (time.time(), data)
+
+    # Maximum size (in characters) of a single data message added to the
+    # conversation. Large installs can return megabytes of entity data, which
+    # blows past the model's context window (~200k tokens for Claude) and makes
+    # every request fail with a deterministic 400 (issue #80). 50k chars is
+    # roughly 13k tokens, which also keeps requests within entry-tier
+    # per-minute token rate limits (e.g. Anthropic tier 1: 30k input
+    # tokens/min) even with a data message persisting in the history window.
+    MAX_DATA_MESSAGE_CHARS = 50_000
+
+    # Maximum combined size (in characters) of the message window sent to the
+    # provider per request. Several capped data messages can still stack past
+    # context and per-minute token budgets (issue #80); the most recent
+    # messages are kept. ~100k chars is roughly 25k tokens.
+    MAX_WINDOW_CHARS = 100_000
+
+    def _format_data_message(self, data: Any) -> str:
+        """Serialize fetched HA data for the conversation, capping its size.
+
+        If the payload is too large, list items are dropped from the end and a
+        truncation notice is included so the model knows to request more
+        specific data instead of the full dump.
+        """
+        message = json.dumps({"data": data}, default=str)
+        if len(message) <= self.MAX_DATA_MESSAGE_CHARS:
+            return message
+
+        note = (
+            "Data truncated to fit the model context window. "
+            "Request more specific data (e.g. a specific entity, domain or area) "
+            "to see the rest."
+        )
+        if isinstance(data, list) and data:
+            truncated = data
+            while len(message) > self.MAX_DATA_MESSAGE_CHARS and len(truncated) > 1:
+                # Scale down proportionally to the overshoot, then re-check
+                # (item sizes vary, so loop until it actually fits).
+                keep = max(
+                    1,
+                    len(truncated) * self.MAX_DATA_MESSAGE_CHARS // len(message),
+                )
+                truncated = truncated[:keep]
+                message = json.dumps(
+                    {
+                        "data": truncated,
+                        "truncated": True,
+                        "total_items": len(data),
+                        "items_shown": len(truncated),
+                        "note": note,
+                    },
+                    default=str,
+                )
+            if len(message) <= self.MAX_DATA_MESSAGE_CHARS:
+                _LOGGER.warning(
+                    "Data response truncated from %d to %d items to fit context window",
+                    len(data),
+                    len(truncated),
+                )
+                return message
+            # A single item alone exceeds the cap - fall through to the
+            # hard-truncated preview below so the cap always holds.
+
+        # Oversized non-list payloads (or a single oversized list item): keep
+        # a prefix of the serialized form as a preview.
+        _LOGGER.warning(
+            "Oversized data response hard-truncated from %d chars", len(message)
+        )
+        preview = message[: self.MAX_DATA_MESSAGE_CHARS]
+        result = json.dumps({"data_preview": preview, "truncated": True, "note": note})
+        # JSON-escaping the preview can push the result back over the cap;
+        # shrink until the final message actually fits.
+        while len(result) > self.MAX_DATA_MESSAGE_CHARS and preview:
+            preview = preview[: int(len(preview) * 0.9)]
+            result = json.dumps(
+                {"data_preview": preview, "truncated": True, "note": note}
+            )
+        return result
 
     def _sanitize_automation_config(self, config: Dict[str, Any]) -> Dict[str, Any]:
         """Sanitize automation configuration to prevent injection attacks."""
@@ -3129,11 +3251,19 @@ Then restart Home Assistant to see your new dashboard in the sidebar."""
                 _LOGGER.debug("Adding system message to new conversation")
                 self.conversation_history.append(self.system_prompt)
 
+            # Remember where this query started so a failure can be rolled
+            # back instead of leaving dangling/oversized messages that poison
+            # every subsequent query (issue #80).
+            history_checkpoint = len(self.conversation_history)
+
             # Add user query to conversation
             self.conversation_history.append({"role": "user", "content": user_query})
             _LOGGER.debug("Added user query to conversation history")
 
-            max_iterations = 5  # Prevent infinite loops
+            # Prevent infinite loops while leaving room for multi-step
+            # discovery: with data responses capped (issue #80) the model may
+            # need several narrower data requests instead of one big dump.
+            max_iterations = 8
             iteration = 0
 
             while iteration < max_iterations:
@@ -3408,7 +3538,7 @@ Then restart Home Assistant to see your new dashboard in the sidebar."""
                             self.conversation_history.append(
                                 {
                                     "role": "user",
-                                    "content": json.dumps({"data": data}, default=str),
+                                    "content": self._format_data_message(data),
                                 }
                             )
                             continue
@@ -3527,7 +3657,7 @@ Then restart Home Assistant to see your new dashboard in the sidebar."""
                             self.conversation_history.append(
                                 {
                                     "role": "user",
-                                    "content": json.dumps({"data": data}, default=str),
+                                    "content": self._format_data_message(data),
                                 }
                             )
                             continue
@@ -3672,7 +3802,7 @@ Then restart Home Assistant to see your new dashboard in the sidebar."""
                             self.conversation_history.append(
                                 {
                                     "role": "user",
-                                    "content": json.dumps({"data": data}, default=str),
+                                    "content": self._format_data_message(data),
                                 }
                             )
                             # Go to next iteration to continue the loop
@@ -3804,6 +3934,12 @@ Then restart Home Assistant to see your new dashboard in the sidebar."""
                                 "request_type": "final_response",
                                 "response": response_to_wrap,
                             }
+                            # Keep the conversation paired: record the assistant
+                            # reply so history doesn't end with a dangling user
+                            # message (issue #80).
+                            self.conversation_history.append(
+                                {"role": "assistant", "content": response_to_wrap}
+                            )
                             result = {
                                 "success": True,
                                 "answer": json.dumps(wrapped_response),
@@ -3824,6 +3960,9 @@ Then restart Home Assistant to see your new dashboard in the sidebar."""
 
                 except Exception as e:
                     _LOGGER.exception("Error processing AI response: %s", str(e))
+                    # Roll back this query's messages so the failure doesn't
+                    # poison subsequent queries (issue #80).
+                    del self.conversation_history[history_checkpoint:]
                     return _with_debug(
                         {
                             "success": False,
@@ -3833,6 +3972,9 @@ Then restart Home Assistant to see your new dashboard in the sidebar."""
 
             # If we've reached max iterations without a final response
             _LOGGER.warning("Reached maximum iterations without final response")
+            # Roll back this query's messages so the failure doesn't poison
+            # subsequent queries (issue #80).
+            del self.conversation_history[history_checkpoint:]
             result = {
                 "success": False,
                 "error": "Maximum iterations reached without final response",
@@ -3870,15 +4012,27 @@ Then restart Home Assistant to see your new dashboard in the sidebar."""
             raise Exception("Rate limit exceeded. Please try again later.")
         retry_count = 0
         last_error = None
-        # Limit conversation history to last 10 messages to prevent token overflow
-        recent_messages = (
-            self.conversation_history[-10:]
-            if len(self.conversation_history) > 10
-            else self.conversation_history
-        )
-        # Ensure system prompt is always the first message
-        if not recent_messages or recent_messages[0].get("role") != "system":
-            recent_messages = [self.system_prompt] + recent_messages
+        # Limit conversation history to the last 10 messages to prevent token
+        # overflow, and cap the window's total size as well: even
+        # individually-capped data messages can stack up past context and
+        # per-minute token budgets (issue #80). Most recent messages win.
+        candidates = [
+            m for m in self.conversation_history[-10:] if m.get("role") != "system"
+        ]
+        recent_messages: List[Dict[str, Any]] = []
+        total_chars = 0
+        for message in reversed(candidates):
+            size = len(str(message.get("content") or ""))
+            if recent_messages and total_chars + size > self.MAX_WINDOW_CHARS:
+                break
+            recent_messages.insert(0, message)
+            total_chars += size
+        # Dropping/slicing can cut mid-turn; ensure the window starts with a
+        # user turn (issue #80).
+        while recent_messages and recent_messages[0].get("role") == "assistant":
+            recent_messages.pop(0)
+        # System prompt is always the first message
+        recent_messages = [self.system_prompt] + recent_messages
 
         _LOGGER.debug("Sending %d messages to AI provider", len(recent_messages))
         _LOGGER.debug("AI provider: %s", self.config.get("ai_provider", "unknown"))
@@ -3942,6 +4096,10 @@ Then restart Home Assistant to see your new dashboard in the sidebar."""
                         continue
 
                 return str(response)
+            except NonRetryableAIError:
+                # Deterministic client error (e.g. 400 "prompt is too long") -
+                # retrying the same payload cannot succeed (issue #80).
+                raise
             except Exception as e:
                 _LOGGER.error(
                     "AI client error on attempt %d: %s", retry_count + 1, str(e)
@@ -3949,7 +4107,13 @@ Then restart Home Assistant to see your new dashboard in the sidebar."""
                 last_error = e
                 retry_count += 1
                 if retry_count < self._max_retries:
-                    await asyncio.sleep(self._retry_delay * retry_count)
+                    delay: float = self._retry_delay * retry_count
+                    if isinstance(e, RateLimitedAIError) and e.retry_after:
+                        # Wait at least as long as the provider asked for
+                        # (capped at 60s) so per-minute token windows can
+                        # actually reset (issue #80).
+                        delay = max(delay, min(e.retry_after, 60))
+                    await asyncio.sleep(delay)
                 continue
         raise Exception(
             f"Failed after {retry_count} retries. Last error: {str(last_error)}"

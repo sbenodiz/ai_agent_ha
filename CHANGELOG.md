@@ -7,6 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.14] - 2026-06-06
+
+### Fixed
+- **Anthropic provider failed every query with `Anthropic API error 400` on larger installs** ([#80](https://github.com/sbenodiz/ai_agent_ha/issues/80))
+  - Root cause (confirmed live against the real Anthropic API): data requests such as
+    `get_entity_registry` dumped the *entire* install (800KB+ on ~2000+ entity setups)
+    into a single conversation message, exceeding Claude's 200k-token context window.
+    The API rejected it with `400 prompt is too long`, the integration discarded the
+    error body, retried the identical payload 10 times, and the oversized message
+    persisted in conversation history — making **every subsequent query fail too**.
+  - Data responses are now capped (~50k chars) with a truncation notice instructing
+    the model to request narrower data; the per-request message window is also capped
+    so multiple data messages can't stack past context or rate-limit budgets.
+  - Provider error bodies are now surfaced to the UI (e.g.
+    `Anthropic API error 400: prompt is too long: 205547 tokens > 200000 maximum`)
+    instead of a bare status code.
+  - Deterministic 4xx errors are no longer retried (previously 10 futile retries and
+    ~45s of backoff); HTTP 429 now honors the server's `retry-after` header so
+    per-minute token rate limit windows (e.g. Anthropic tier 1: 30k input tokens/min)
+    can actually reset between attempts.
+  - Failed queries are rolled back from conversation history so they can't poison
+    subsequent queries; the history window can no longer start mid-turn after slicing.
+  - Anthropic request timeout raised from 30s to 300s, matching every other provider.
+  - Agent loop allows up to 8 iterations (was 5) since capped data responses can
+    require additional narrower data requests.
+
 ## [1.13] - 2026-06-01
 
 ### Fixed
