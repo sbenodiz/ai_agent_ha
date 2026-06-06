@@ -1739,16 +1739,20 @@ class AiAgentHaAgent:
                     },
                     default=str,
                 )
-            _LOGGER.warning(
-                "Data response truncated from %d to %d items to fit context window",
-                len(data),
-                len(truncated),
-            )
-            return message
+            if len(message) <= self.MAX_DATA_MESSAGE_CHARS:
+                _LOGGER.warning(
+                    "Data response truncated from %d to %d items to fit context window",
+                    len(data),
+                    len(truncated),
+                )
+                return message
+            # A single item alone exceeds the cap - fall through to the
+            # hard-truncated preview below so the cap always holds.
 
-        # Non-list payloads: keep a prefix of the serialized form as a preview.
+        # Oversized non-list payloads (or a single oversized list item): keep
+        # a prefix of the serialized form as a preview.
         _LOGGER.warning(
-            "Oversized non-list data response truncated from %d chars", len(message)
+            "Oversized data response hard-truncated from %d chars", len(message)
         )
         preview = message[: self.MAX_DATA_MESSAGE_CHARS]
         result = json.dumps({"data_preview": preview, "truncated": True, "note": note})

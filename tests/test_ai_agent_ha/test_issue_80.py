@@ -290,6 +290,23 @@ class TestDataMessageTruncation:
         parsed = json.loads(msg)
         assert parsed["truncated"] is True
 
+    def test_single_oversized_list_item_still_capped(self):
+        try:
+            from custom_components.ai_agent_ha.agent import (  # noqa: F401
+                AiAgentHaAgent,
+            )
+        except ImportError:
+            pytest.skip("agent module not available")
+
+        agent = _make_agent()
+        # one list item alone exceeds the cap - the item-dropping loop can't
+        # shrink below one item, so the hard-truncated preview must kick in
+        data = [{"entity_id": "sensor.giant", "attributes": {"blob": "x" * 200_000}}]
+        msg = agent._format_data_message(data)
+        assert len(msg) <= agent.MAX_DATA_MESSAGE_CHARS
+        parsed = json.loads(msg)
+        assert parsed["truncated"] is True
+
 
 class TestHistoryRollbackOnFailure:
     """Fix 4: failed queries don't poison the conversation history."""
