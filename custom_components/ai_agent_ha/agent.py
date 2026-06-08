@@ -29,6 +29,9 @@ ai_agent_ha:
 import asyncio
 import json
 import logging
+import os
+import shutil
+import tempfile
 import time
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional, Union
@@ -1773,14 +1776,104 @@ class AiAgentHaAgent:
                 # Sanitize strings
                 sanitized[key] = str(value).strip()[:100]  # Limit length
             elif key in ["trigger", "condition", "action"]:
-                # Validate arrays
+                # Home Assistant accepts either a single mapping or a list for
+                # trigger/condition/action. Normalize a single mapping to a
+                # one-element list instead of silently dropping it (which would
+                # later raise KeyError and reject a perfectly valid automation).
                 if isinstance(value, list):
                     sanitized[key] = value
+                elif isinstance(value, dict):
+                    sanitized[key] = [value]
             elif key == "mode":
                 # Validate mode
                 if value in ["single", "restart", "queued", "parallel"]:
                     sanitized[key] = value
         return sanitized
+
+    @staticmethod
+    def _read_automations_file(path: str) -> List[Dict[str, Any]]:
+        """Read and parse automations.yaml into a list of automations.
+
+        Runs inside an executor thread. Raises FileNotFoundError when the file
+        does not exist (the caller treats that as "no automations yet").
+        """
+        with open(path, "r", encoding="utf-8") as handle:
+            data = yaml.safe_load(handle)
+
+        if data is None:
+            return []
+        if not isinstance(data, list):
+            # automations.yaml is always a top-level list. If it is anything
+            # else, refuse to touch it rather than risk clobbering content we
+            # don't understand.
+            raise ValueError("automations.yaml does not contain a list of automations")
+        return data
+
+    @staticmethod
+    def _write_automations_file(path: str, automations: List[Dict[str, Any]]) -> None:
+        """Safely persist automations to automations.yaml.
+
+        Runs inside an executor thread. Compared to a naive ``yaml.dump`` to an
+        open file handle, this:
+          * keeps accented/unicode text readable instead of mangling it into
+            ``\\uXXXX`` escapes (``allow_unicode=True``),
+          * preserves key order so automations stay diff-friendly
+            (``sort_keys=False``),
+          * never line-wraps long Jinja templates (``width``),
+          * validates that the serialized YAML round-trips back to the same
+            data before touching disk,
+          * backs up the previous file to ``<path>.bak`` so the user can roll
+            back,
+          * writes atomically (temp file + ``os.replace``) so a crash or a bad
+            write can never leave a half-written / corrupted file in place.
+        """
+        # Use safe_dump (the SafeDumper) so the writer mirrors the safe_load
+        # reader: only plain YAML types are ever emitted, never opaque
+        # ``!!python/object`` tags.
+        content = yaml.safe_dump(
+            automations,
+            default_flow_style=False,
+            allow_unicode=True,
+            sort_keys=False,
+            width=4096,
+        )
+
+        # Guard against ever writing YAML that does not decode back to the
+        # exact same data structure.
+        if yaml.safe_load(content) != automations:
+            raise ValueError(
+                "Refusing to write automations.yaml: serialized YAML did not "
+                "round-trip cleanly"
+            )
+
+        path_exists = os.path.exists(path)
+
+        # Back up the existing file before overwriting it.
+        if path_exists:
+            shutil.copy2(path, f"{path}.bak")
+
+        # Atomic write: write to a temp file in the same directory, fsync, then
+        # atomically replace the target.
+        directory = os.path.dirname(path) or "."
+        fd, tmp_path = tempfile.mkstemp(
+            prefix=".automations.", suffix=".yaml.tmp", dir=directory
+        )
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                handle.write(content)
+                handle.flush()
+                os.fsync(handle.fileno())
+            # Preserve the original file's permission bits. mkstemp creates the
+            # temp file as 0600, so without this an atomic replace would strip
+            # any group/world bits the user or an external editor relied on.
+            if path_exists:
+                shutil.copymode(path, tmp_path)
+            os.replace(tmp_path, path)
+        except BaseException:
+            # Never leave a stray temp file behind on failure.
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+            raise
 
     async def get_entity_state(self, entity_id: str) -> Dict[str, Any]:
         """Get the state of a specific entity."""
@@ -2495,6 +2588,17 @@ class AiAgentHaAgent:
             # Sanitize configuration
             sanitized_config = self._sanitize_automation_config(automation_config)
 
+            # Make sure the core building blocks survived sanitization. A
+            # malformed trigger/action (e.g. not a list or mapping) is dropped
+            # by the sanitizer, so validate here and fail with a clear message
+            # instead of raising KeyError further down.
+            if not sanitized_config.get("alias"):
+                return {"error": "Automation must include a non-empty alias"}
+            if not sanitized_config.get("trigger"):
+                return {"error": "Automation must include at least one trigger"}
+            if not sanitized_config.get("action"):
+                return {"error": "Automation must include at least one action"}
+
             # Generate a unique ID for the automation
             automation_id = f"ai_agent_auto_{int(time.time() * 1000)}"
 
@@ -2513,7 +2617,7 @@ class AiAgentHaAgent:
             automations_path = self.hass.config.path("automations.yaml")
             try:
                 current_automations = await self.hass.async_add_executor_job(
-                    lambda: yaml.safe_load(open(automations_path, "r")) or []
+                    self._read_automations_file, automations_path
                 )
             except FileNotFoundError:
                 current_automations = []
@@ -2530,13 +2634,13 @@ class AiAgentHaAgent:
             # Append new automation
             current_automations.append(automation_entry)
 
-            # Write back to file using async executor
+            # Write back to file safely: backs up the previous file, validates
+            # the YAML round-trips, preserves unicode/key order, and replaces
+            # the file atomically so a bad write can never corrupt it.
             await self.hass.async_add_executor_job(
-                lambda: yaml.dump(
-                    current_automations,
-                    open(automations_path, "w"),
-                    default_flow_style=False,
-                )
+                self._write_automations_file,
+                automations_path,
+                current_automations,
             )
 
             # Reload automations
