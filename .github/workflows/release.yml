@@ -61,11 +61,9 @@ jobs:
     - name: Create Release
       uses: softprops/action-gh-release@v2
       with:
-        tag_name: ${{ github.ref }}
-        name: Release ${{ github.ref }}
-        body: |
-          Changes in this Release
-          - Automated release for tag ${{ github.ref }}
+        tag_name: ${{ github.ref_name }}
+        name: ${{ github.ref_name }}
+        generate_release_notes: true
         draft: false
         prerelease: false
         files: ai_agent_ha.zip
