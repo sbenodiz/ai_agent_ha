@@ -13,6 +13,7 @@ dist/
 build/
 *.egg
 .venv/
+.venv-repro/
 venv/
 env/
 
@@ -38,4 +39,9 @@ htmlcov/
 # Home Assistant (if used)
 home-assistant.log
 homeassistant/
-.gitignore
+
+# Local issue-repro / e2e scratch scripts (not part of the test suite)
+repro_issue_*.py
+live_repro_issue_*.py
+run_tests_issue_*.py
+e2e_issue_*.py
