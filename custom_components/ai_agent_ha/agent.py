@@ -3305,11 +3305,15 @@ Then restart Home Assistant to see your new dashboard in the sidebar."""
                     if selected_provider == "local_ollama":
                         # Support legacy local_url
                         url = token or config.get("local_url")
+                        self.ai_client = provider_settings["client_class"](
+                            url, provider_settings["model"]
+                        )
                     else:
                         url = token
-                    self.ai_client = provider_settings["client_class"](
-                        url, provider_settings["model"]
-                    )
+                        api_key = config.get("openai_compatible_api_key", "") or ""
+                        self.ai_client = provider_settings["client_class"](
+                            url, provider_settings["model"], api_key or None
+                        )
                     _LOGGER.debug(
                         f"Initialized {selected_provider} client with model {provider_settings['model']}"
                     )
